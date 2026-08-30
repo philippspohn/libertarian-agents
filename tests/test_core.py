@@ -751,6 +751,31 @@ def test_macos_sandbox_uses_canonical_root_and_environment_local_homes(
     )
 
 
+def test_macos_sandbox_passes_narrow_darwin_write_directories(env, monkeypatch):
+    from libagents import sandbox as sandbox_module
+
+    cfg = EnvConfig(sandbox="macos")
+    sandbox = sandbox_module.MacOSSandbox(env, cfg)
+    monkeypatch.setattr(sandbox, "_require_seatbelt", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setattr(
+        sandbox_module,
+        "_darwin_user_write_dirs",
+        lambda: (
+            sandbox_module.Path("/private/var/folders/aa/user/T"),
+            sandbox_module.Path("/private/var/folders/aa/user/C"),
+        ),
+    )
+
+    argv = sandbox._argv("/bin/true")
+
+    assert "DARWIN_TEMP=/private/var/folders/aa/user/T" in argv
+    assert "DARWIN_CACHE=/private/var/folders/aa/user/C" in argv
+    assert "/xcrun_db(-[^/]+)?$" in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert "CFNetworkDownload_" in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert "NSIRD_swift-(build|driver|frontend)_" in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert "PlugInCache-xcodebuild" in sandbox_module.MACOS_SEATBELT_PROFILE
+
+
 def test_host_sandbox_status_marker_tracks_start_and_stop(env):
     from libagents.sandbox import LocalSandbox
 

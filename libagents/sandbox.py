@@ -214,6 +214,26 @@ MACOS_SEATBELT_PROFILE = """\
 
 (allow file-read*)
 (allow file-write* (subpath (param "ENV_ROOT")))
+
+; Xcode and SwiftPM ignore TMPDIR for a few atomic caches. Permit only the
+; cache names they create inside this user's kernel-provided Darwin folders.
+(allow file-write*
+  (require-all
+    (subpath (param "DARWIN_TEMP"))
+    (require-any
+      (regex #"/xcrun_db(-[^/]+)?$")
+      (regex #"/CFNetworkDownload_[^/]+[.]tmp$")
+      (regex #"/TemporaryItems/NSIRD_swift-(build|driver|frontend)_[^/]+(/.*)?$")
+    )
+  )
+)
+(allow file-write*
+  (require-all
+    (subpath (param "DARWIN_CACHE"))
+    (regex #"/com[.]apple[.]DeveloperTools/[^/]+/Xcode/PlugInCache-xcodebuild[.]xcplugincache$")
+  )
+)
+
 (allow process-fork process-exec)
 (allow process-info* (target self))
 (allow sysctl-read)
@@ -221,6 +241,25 @@ MACOS_SEATBELT_PROFILE = """\
 (allow ipc-posix-shm*)
 (allow network*)
 """
+
+
+# These Darwin-only confstr constants are published in Apple's unistd.h but
+# are not included in Python's os.confstr_names mapping.
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
+
+def _darwin_user_write_dirs() -> tuple[Path, Path]:
+    """Return canonical, kernel-provided per-user Darwin temp/cache folders."""
+    raw_temp = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    if not raw_temp:
+        raise RuntimeError("macOS did not provide a Darwin user temporary directory")
+    temp = Path(raw_temp).resolve()
+    # The cache directory is the T directory's C sibling. macOS currently
+    # returns EIO for _CS_DARWIN_USER_CACHE_DIR on some releases, so deriving
+    # it from the kernel-provided temp path is more reliable.
+    if temp.name != "T" or temp.parent.name in {"", ".", ".."}:
+        raise RuntimeError(f"unexpected Darwin user temporary directory: {temp}")
+    return temp, temp.with_name("C")
 
 
 def _host_workdir(host_root: Path, cwd: str) -> Path:
@@ -383,9 +422,12 @@ class MacOSSandbox:
         return executable
 
     def _argv(self, *command: str) -> list[str]:
+        darwin_temp, darwin_cache = _darwin_user_write_dirs()
         return [
             self._require_seatbelt(),
             "-D", f"ENV_ROOT={self.env_root}",
+            "-D", f"DARWIN_TEMP={darwin_temp}",
+            "-D", f"DARWIN_CACHE={darwin_cache}",
             "-p", MACOS_SEATBELT_PROFILE,
             *command,
         ]

@@ -233,12 +233,14 @@ without Docker.
 `--sandbox macos` is the host-native option for workloads that need Apple
 Metal/MLX. It runs through macOS Seatbelt with an environment-local `HOME`,
 `TMPDIR`, and cache: subprocesses may read host files, access the network, and
-use the GPU, but filesystem writes/deletions are confined to that environment
-and signalling unrelated host processes is denied. This is a pragmatic guard
-against accidental damage from trusted agents, not a security boundary for
-hostile code. Seatbelt is an Apple-deprecated interface and may change in a
-future macOS release; the mode fails closed when `sandbox-exec` is unavailable.
-For a stronger boundary, run the server under a dedicated macOS user as well.
+use the GPU. Filesystem writes/deletions are confined to that environment,
+apart from filename-scoped Swift/Xcode caches in the current user's Darwin
+temporary/cache folders; signalling unrelated host processes is denied. This
+is a pragmatic guard against accidental damage from trusted agents, not a
+security boundary for hostile code. Seatbelt is an Apple-deprecated interface
+and may change in a future macOS release; the mode fails closed when
+`sandbox-exec` is unavailable. For a stronger boundary, run the server under a
+dedicated macOS user as well.
 
 Each agent gets a persistent shell process. Its current directory, exported
 variables, functions, and background jobs survive between `shell` tool calls.
