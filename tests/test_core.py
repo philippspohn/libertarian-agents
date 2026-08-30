@@ -770,10 +770,15 @@ def test_macos_sandbox_passes_narrow_darwin_write_directories(env, monkeypatch):
 
     assert "DARWIN_TEMP=/private/var/folders/aa/user/T" in argv
     assert "DARWIN_CACHE=/private/var/folders/aa/user/C" in argv
+    assert (
+        "DARWIN_METAL_CACHE=/private/var/folders/aa/user/C/com.apple.metalfe"
+        in argv
+    )
     assert "/xcrun_db(-[^/]+)?$" in sandbox_module.MACOS_SEATBELT_PROFILE
     assert "CFNetworkDownload_" in sandbox_module.MACOS_SEATBELT_PROFILE
     assert "NSIRD_swift-(build|driver|frontend)_" in sandbox_module.MACOS_SEATBELT_PROFILE
     assert "PlugInCache-xcodebuild" in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert '(subpath (param "DARWIN_METAL_CACHE"))' in sandbox_module.MACOS_SEATBELT_PROFILE
 
 
 def test_host_sandbox_status_marker_tracks_start_and_stop(env):

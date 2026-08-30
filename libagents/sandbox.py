@@ -233,6 +233,9 @@ MACOS_SEATBELT_PROFILE = """\
     (regex #"/com[.]apple[.]DeveloperTools/[^/]+/Xcode/PlugInCache-xcodebuild[.]xcplugincache$")
   )
 )
+; The Metal frontend also ignores TMPDIR and creates compiler modules in its
+; fixed per-user cache. Limit the exception to that one cache subtree.
+(allow file-write* (subpath (param "DARWIN_METAL_CACHE")))
 
 (allow process-fork process-exec)
 (allow process-info* (target self))
@@ -428,6 +431,7 @@ class MacOSSandbox:
             "-D", f"ENV_ROOT={self.env_root}",
             "-D", f"DARWIN_TEMP={darwin_temp}",
             "-D", f"DARWIN_CACHE={darwin_cache}",
+            "-D", f"DARWIN_METAL_CACHE={darwin_cache / 'com.apple.metalfe'}",
             "-p", MACOS_SEATBELT_PROFILE,
             *command,
         ]
