@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+node_modules/
+ui/dist/
+.DS_Store
+.pytest_cache/
+
+.runner.lock
+pricing.json
