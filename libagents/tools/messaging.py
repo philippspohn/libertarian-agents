@@ -38,12 +38,41 @@ def set_status(ctx: AgentContext, args: dict) -> ToolResult:
     """
     Send a message. Target is '#channel' for a channel (created on first use)
     or '@agent' for a direct message. Long messages are truncated on the board
-    and the full text is written to a file the recipient can read.
+    and the full text is written to a file the recipient can read. To prevent
+    replies based on stale context, a send is normally blocked if that same
+    channel or DM has unread inbound messages: the next page is returned and
+    marked read so you can reconsider and retry. In a continuously busy scope,
+    set send_anyway=true after reviewing the returned messages.
     """,
-    obj({"to": {"type": "string"}, "body": {"type": "string"}}, ["to", "body"]),
+    obj(
+        {
+            "to": {"type": "string"},
+            "body": {"type": "string"},
+            "send_anyway": {
+                "type": "boolean",
+                "description": "Bypass the unread-message guard after reviewing the scope.",
+            },
+        },
+        ["to", "body"],
+    ),
 )
 def send_message(ctx: AgentContext, args: dict) -> ToolResult:
     try:
+        if not args.get("send_anyway", False):
+            unseen, more = ctx.board.fetch_unread_scope(ctx.profile, args["to"], limit=5)
+            if unseen:
+                suffix = (
+                    "\nMore unread messages remain in this scope. Retry to review the next page, "
+                    "or use send_anyway=true if your message is still valid."
+                    if more
+                    else
+                    "\nReview these messages, then retry the send if your message is still valid."
+                )
+                return ToolResult(
+                    f"MESSAGE NOT SENT: unread messages arrived in {args['to']}.\n"
+                    + "\n".join(m.render() for m in unseen)
+                    + suffix
+                )
         mid, truncated = ctx.board.send(
             ctx.profile,
             args["to"],
@@ -59,7 +88,7 @@ def send_message(ctx: AgentContext, args: dict) -> ToolResult:
 
 @tool(
     "check_inbox",
-    "Read unread messages addressed to you or to channels you joined. Advances your read cursor.",
+    "Read unread messages addressed to you or to channels you joined. Advances only the cursors for scopes whose messages are returned.",
     obj({"limit": {"type": "integer", "description": "Default 30."}}),
 )
 def check_inbox(ctx: AgentContext, args: dict) -> ToolResult:

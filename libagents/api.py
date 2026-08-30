@@ -312,6 +312,11 @@ def get_agent(env: str, profile: str) -> dict:
                 },
                 {"name": "Wake message", "timing": "each wake", "content": prompts.WAKE},
                 {
+                    "name": "Messages delivered on wake",
+                    "timing": "when unread messages exist; at most five per wake",
+                    "content": prompts.WAKE_MESSAGES,
+                },
+                {
                     "name": "Tool-result status prefix",
                     "timing": "prepended to every application tool result",
                     "content": prompts.STATUS,

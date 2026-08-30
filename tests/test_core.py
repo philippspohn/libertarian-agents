@@ -14,6 +14,7 @@ import pytest
 os.environ.setdefault("LIBAGENTS_HOME", tempfile.mkdtemp(prefix="libagents-test-"))
 
 from libagents import control, environment, paths  # noqa: E402
+from libagents.board import SCHEMA as BOARD_SCHEMA  # noqa: E402
 from libagents.board import USER, Board, parse_target  # noqa: E402
 from libagents.models import EnvConfig, RunnerConfig, UsageRow  # noqa: E402
 from libagents.paths import PathMapper  # noqa: E402
@@ -84,6 +85,47 @@ def test_unread_after_baseline_prevents_wake_spin(env):
     assert b.unread_count("bob", after=baseline) == 1
 
 
+def test_scope_read_does_not_acknowledge_another_scope(env):
+    b = Board(paths.board_db(env))
+    b.ensure_channel("private")
+    b.subscribe("bob", "private")
+    b.send("alice", "#general", "public update")
+    b.send("alice", "#private", "private update")
+
+    public, more = b.fetch_unread_scope("bob", "#general")
+    assert [m.body for m in public] == ["public update"]
+    assert not more
+    assert b.unread_count("bob") == 1
+    assert [m.body for m in b.fetch_unread("bob")] == ["private update"]
+
+
+def test_joining_channel_starts_at_current_history(env):
+    b = Board(paths.board_db(env))
+    b.send("alice", "#research", "before bob joined")
+    b.subscribe("bob", "research")
+    assert b.fetch_unread("bob") == []
+    b.send("alice", "#research", "after bob joined")
+    assert [m.body for m in b.fetch_unread("bob")] == ["after bob joined"]
+
+
+def test_legacy_global_cursor_is_migrated_per_scope(tmp_path):
+    db = tmp_path / "board.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(BOARD_SCHEMA)
+        conn.execute("INSERT INTO subscriptions VALUES ('bob', 'general')")
+        conn.execute(
+            "INSERT INTO messages (ts,sender,channel,recipient,body) VALUES (?,?,?,?,?)",
+            ("now", "alice", "general", None, "already read"),
+        )
+        conn.execute(
+            "INSERT INTO messages (ts,sender,channel,recipient,body) VALUES (?,?,?,?,?)",
+            ("now", "alice", "general", None, "still unread"),
+        )
+        conn.execute("INSERT INTO cursors VALUES ('bob', 1)")
+
+    assert [m.body for m in Board(db).fetch_unread("bob")] == ["still unread"]
+
+
 def test_long_message_spills_to_file(env, tmp_path):
     b = Board(paths.board_db(env))
     spill = paths.shared_dir(env) / "messages"
@@ -128,6 +170,71 @@ def test_leave_channel_tool_stops_channel_delivery(env):
 
 
 # ------------------------------------------------------------------- tools
+
+
+def test_send_message_blocks_on_unread_scope_then_retries(env):
+    from libagents.providers.base import ToolCall
+    from libagents.runner import Runner
+
+    board = Board(paths.board_db(env))
+    for i in range(6):
+        board.send("bob", "#general", f"new context {i}")
+    runner = Runner(env, "alice")
+
+    blocked = runner._execute(
+        ToolCall("1", "send_message", {"to": "#general", "body": "stale reply"})
+    )
+    assert "MESSAGE NOT SENT" in blocked
+    assert "new context 0" in blocked and "new context 4" in blocked
+    assert "new context 5" not in blocked
+    assert "More unread messages remain" in blocked
+    assert board.unread_count("alice") == 1
+    assert "stale reply" not in [m.body for m in board.recent()]
+
+    blocked_again = runner._execute(
+        ToolCall("2", "send_message", {"to": "#general", "body": "updated reply"})
+    )
+    assert "MESSAGE NOT SENT" in blocked_again and "new context 5" in blocked_again
+
+    sent = runner._execute(
+        ToolCall("3", "send_message", {"to": "#general", "body": "updated reply"})
+    )
+    assert "sent #" in sent
+    assert [m.body for m in board.recent()][-1] == "updated reply"
+
+
+def test_send_anyway_escapes_continuously_busy_scope(env):
+    from libagents.providers.base import ToolCall
+    from libagents.runner import Runner
+
+    board = Board(paths.board_db(env))
+    board.send("bob", "@alice", "another update")
+    runner = Runner(env, "alice")
+    sent = runner._execute(
+        ToolCall(
+            "1",
+            "send_message",
+            {"to": "@bob", "body": "still relevant", "send_anyway": True},
+        )
+    )
+    assert "sent #" in sent
+    assert [m.body for m in board.history("alice", "@bob")][-1] == "still relevant"
+
+
+def test_wake_injects_bounded_unread_message_page(env):
+    from libagents.runner import Runner
+
+    board = Board(paths.board_db(env))
+    for i in range(6):
+        board.send("bob", "@alice", f"wake message {i}")
+
+    item = Runner(env, "alice")._wake_item("new message")
+    text = item["content"][0]["text"]
+    assert "MESSAGES DELIVERED ON WAKE" in text
+    assert "wake message 0" in text and "wake message 4" in text
+    assert "wake message 5" not in text
+    assert "1 unread message(s) remain" in text
+    assert board.unread_count("alice") == 1
 
 
 def test_default_memory_is_only_the_state_snapshot_hint():

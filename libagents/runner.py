@@ -43,6 +43,7 @@ GRACE_STEPS = 3
 """Turns granted after the budget is blown, so the agent can save memory.md."""
 
 MAX_NUDGES = 3
+WAKE_MESSAGE_LIMIT = 5
 
 
 @dataclass
@@ -194,8 +195,7 @@ class Runner:
         self.events.emit("run_start", reason=wake_reason)
 
         conv = self._load_conversation()
-        unread = self.board.unread_count(self.profile)
-        conv.items.append(self.provider.user_item(prompts.WAKE.format(reason=wake_reason, unread=unread)))
+        conv.items.append(self._wake_item(wake_reason))
 
         try:
             state = self._loop(conv)
@@ -207,6 +207,24 @@ class Runner:
         finally:
             conv.save(self.conv_path)
         return state
+
+    def _wake_item(self, wake_reason: str) -> dict:
+        """Build the wake input and deliver a bounded page of real messages."""
+        unread = self.board.unread_count(self.profile)
+        text = prompts.WAKE.format(reason=wake_reason, unread=unread)
+        if unread:
+            msgs = self.board.fetch_unread(self.profile, limit=WAKE_MESSAGE_LIMIT)
+            remaining = self.board.unread_count(self.profile)
+            remainder = (
+                f"{remaining} unread message(s) remain; call check_inbox for the next page."
+                if remaining
+                else "No additional unread messages remain."
+            )
+            text += "\n\n" + prompts.WAKE_MESSAGES.format(
+                messages="\n".join(m.render() for m in msgs),
+                remainder=remainder,
+            ).rstrip()
+        return self.provider.user_item(text)
 
     def _loop(self, conv: Conversation) -> str:
         nudges = 0

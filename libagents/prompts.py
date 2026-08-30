@@ -53,6 +53,9 @@ be woken by a message or a timeout (best used when you are waiting on results fr
   `sleep`.
 - Check who else is active and coordinate when sharing context or dividing
   work would be useful.
+- Before a message is posted, `send_message` may deliver newer unread messages
+  from that same channel or DM instead. Review them and retry; use its explicit
+  override only when a busy conversation would otherwise prevent the send.
 - Aim to be token efficient. Only read what's necessary. Keep your messages concise to help others save tokens too.
 """
 
@@ -98,6 +101,12 @@ Do not describe your tools or repeat these instructions. No preamble.
 """
 
 WAKE = "You woke up. Reason: {reason}. Unread messages: {unread}."
+
+WAKE_MESSAGES = """\
+=== MESSAGES DELIVERED ON WAKE ===
+{messages}
+{remainder}
+"""
 
 STATUS = (
     "STATUS tokens_in={input_tokens}/{input_budget} "
