@@ -230,6 +230,16 @@ commands cross the boundary. `--sandbox local` runs commands as plain
 subprocesses instead — a dev fallback with **no isolation**, for machines
 without Docker.
 
+`--sandbox macos` is the host-native option for workloads that need Apple
+Metal/MLX. It runs through macOS Seatbelt with an environment-local `HOME`,
+`TMPDIR`, and cache: subprocesses may read host files, access the network, and
+use the GPU, but filesystem writes/deletions are confined to that environment
+and signalling unrelated host processes is denied. This is a pragmatic guard
+against accidental damage from trusted agents, not a security boundary for
+hostile code. Seatbelt is an Apple-deprecated interface and may change in a
+future macOS release; the mode fails closed when `sandbox-exec` is unavailable.
+For a stronger boundary, run the server under a dedicated macOS user as well.
+
 Each agent gets a persistent shell process. Its current directory, exported
 variables, functions, and background jobs survive between `shell` tool calls.
 The session resets when the environment/server stops or a command times out.
@@ -243,8 +253,8 @@ new values.
 
 Paths are `<env_root>/agents/<name>` and `<env_root>/shared`, where
 `env_root` is `/env` under Docker and the host path under `local`. The agent
-is told its root in the prompt. File tools also accept paths relative to the
-root.
+is told its root in the prompt. The macOS mode also uses the host path. File
+tools accept paths relative to the root.
 
 ## Tools
 

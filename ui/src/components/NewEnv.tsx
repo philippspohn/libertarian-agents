@@ -38,11 +38,15 @@ export default function NewEnv({ onClose, onCreated }: {
         <input value={name} onChange={(e) => setName(e.target.value.toLowerCase())} placeholder="research-lab" autoFocus />
         <div className="grid2">
           <div><div className="section-title">sandbox</div><select value={sandbox} onChange={(e) => setSandbox(e.target.value)}>
-            <option value="docker">docker (isolated)</option><option value="local">local (no isolation)</option>
+            <option value="docker">docker (isolated)</option>
+            <option value="macos">macOS (native GPU, write-confined)</option>
+            <option value="local">local (unsafe host)</option>
           </select></div>
           <div><div className="section-title">container image</div><input value={image} disabled={sandbox !== "docker"} onChange={(e) => setImage(e.target.value)} /></div>
           <div><div className="section-title">environment input-token cap</div><input value={cap} placeholder="none" onChange={(e) => setCap(e.target.value.replace(/\D/g, ""))} /></div>
         </div>
+        {sandbox === "macos" && <div className="dim mono-sm" style={{ marginTop: 8 }}>Trusted-code mode. Runs natively for Metal/MLX; agents may read host files and use the network, but Seatbelt confines writes and deletions to this environment.</div>}
+        {sandbox === "local" && <div className="mono-sm" style={{ color: "var(--red)", marginTop: 8 }}>No isolation: shell commands can modify any host file your user account can access.</div>}
         <div className="section-title">environment .env</div>
         <div className="dim mono-sm" style={{ marginBottom: 6 }}>Optional variables available to every agent shell. Stored as plain text inside this trusted environment.</div>
         <textarea className="code-input" rows={6} value={envFile} onChange={(e) => setEnvFile(e.target.value)} placeholder={"API_BASE_URL=https://example.com\nPROJECT_MODE=research"} />

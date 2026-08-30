@@ -55,7 +55,7 @@ def _server() -> Optional[str]:
 @env_app.command("create")
 def env_create(
     name: str,
-    sandbox: str = typer.Option("docker", "--sandbox", help="docker | local"),
+    sandbox: str = typer.Option("docker", "--sandbox", help="docker | macos | local"),
     image: str = typer.Option("python:3.12-slim", "--image"),
     secret: list[str] = typer.Option([], "--secret", help="Host env var to forward into the sandbox."),
 ):
@@ -68,6 +68,11 @@ def env_create(
     console.print(f"[green]created[/] environment {name} at {paths.env_dir(name)}")
     if sandbox == "local":
         console.print("[yellow]note:[/] the local sandbox runs commands on this host without isolation")
+    elif sandbox == "macos":
+        console.print(
+            "[yellow]note:[/] the macos sandbox is host-native and trusted-code only; "
+            "Seatbelt confines writes to the environment while preserving Metal/MLX"
+        )
 
 
 @env_app.command("ls")

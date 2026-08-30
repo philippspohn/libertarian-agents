@@ -126,9 +126,11 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
         <div className="spread"><b>environment configuration</b><button onClick={save} disabled={busyAction !== null}>save</button></div>
         <div className="grid2">
           <div><div className="section-title">sandbox</div><select value={sandbox} onChange={(e) => setSandbox(e.target.value)}>
-            <option value="docker">docker</option><option value="local">local (no isolation)</option>
+            <option value="docker">docker (isolated)</option>
+            <option value="macos">macOS (native GPU, write-confined)</option>
+            <option value="local">local (unsafe host)</option>
           </select></div>
-          <div><div className="section-title">container image</div><input value={image} onChange={(e) => setImage(e.target.value)} /></div>
+          <div><div className="section-title">container image</div><input value={image} disabled={sandbox !== "docker"} onChange={(e) => setImage(e.target.value)} /></div>
           <div><div className="section-title">forward host variables</div><input value={secrets} placeholder="NAME, OTHER_NAME" onChange={(e) => setSecrets(e.target.value)} />
             <div className="dim mono-sm" style={{ marginTop: 4 }}>Names only. Their values come from the host process and override matching environment .env keys.</div>
           </div>
@@ -137,6 +139,8 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
         <div className="dim mono-sm" style={{ marginTop: 8 }}>
           Web search is provider-native: OpenAI runners receive the Responses web_search tool; OpenRouter runners receive openrouter:web_search.
         </div>
+        {sandbox === "macos" && <div className="dim mono-sm" style={{ marginTop: 8 }}>Trusted-code mode: native Metal/MLX and host reads/network remain available. Apple Seatbelt confines filesystem writes and deletions to this environment and blocks signalling unrelated host processes.</div>}
+        {sandbox === "local" && <div className="mono-sm" style={{ color: "var(--red)", marginTop: 8 }}>Unsafe host mode: shell commands have the same filesystem access as the server process.</div>}
         <div className="dim mono-sm" style={{ marginTop: 8 }}>Stop the environment before changing sandbox, image, or host-forwarded variables.</div>
       </div>
       <div className="card">

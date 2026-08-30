@@ -89,7 +89,7 @@ class RunnerConfig(BaseModel):
 
 
 class EnvConfig(BaseModel):
-    sandbox: Literal["docker", "local"] = "docker"
+    sandbox: Literal["docker", "macos", "local"] = "docker"
     image: str = "python:3.12-slim"
     max_message_chars: int = 4000
     secrets: list[str] = Field(default_factory=list)

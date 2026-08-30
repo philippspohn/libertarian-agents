@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import os
 import json
+import shlex
 import sqlite3
+import sys
 import tempfile
 
 import pytest
@@ -723,6 +725,82 @@ def test_environment_dotenv_and_forwarded_host_values(env, monkeypatch):
         "COLLISION": "host",
         "HOST_VALUE": "forwarded",
     }
+
+
+def test_macos_sandbox_uses_canonical_root_and_environment_local_homes(
+    env, monkeypatch
+):
+    from libagents.sandbox import MacOSSandbox, _macos_host_env
+
+    environment.write_env_file(env, "FILE_VALUE=yes\nHOME=/must-not-win\n")
+    monkeypatch.setenv("FORWARDED_VALUE", "available")
+    monkeypatch.setenv("UNFORWARDED_SECRET", "hidden")
+    cfg = EnvConfig(sandbox="macos", secrets=["FORWARDED_VALUE"])
+    sandbox = MacOSSandbox(env, cfg)
+    environ = _macos_host_env(env, cfg, sandbox.host_root)
+
+    assert sandbox.env_root == str(paths.env_dir(env).resolve())
+    assert environ["FILE_VALUE"] == "yes"
+    assert environ["FORWARDED_VALUE"] == "available"
+    assert "UNFORWARDED_SECRET" not in environ
+    assert environ["HOME"].startswith(f"{sandbox.env_root}/.sandbox/")
+    assert environ["TMPDIR"].startswith(f"{sandbox.env_root}/.sandbox/")
+    assert environ["CFFIXED_USER_HOME"] == environ["HOME"]
+    assert environ["CLANG_MODULE_CACHE_PATH"].startswith(
+        f"{sandbox.env_root}/.sandbox/cache/"
+    )
+
+
+def test_host_sandbox_status_marker_tracks_start_and_stop(env):
+    from libagents.sandbox import LocalSandbox
+
+    sandbox = LocalSandbox(env, EnvConfig(sandbox="local"))
+    assert not sandbox.running()
+    sandbox.start()
+    assert sandbox.running()
+    sandbox.stop()
+    assert not sandbox.running()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or os.environ.get("LIBAGENTS_TEST_MACOS_SANDBOX") != "1",
+    reason="opt-in macOS Seatbelt integration test",
+)
+def test_macos_sandbox_confines_writes_and_preserves_shell_sessions(env):
+    from libagents.sandbox import MacOSSandbox
+
+    cfg = EnvConfig(sandbox="macos")
+    sandbox = MacOSSandbox(env, cfg)
+    outside = paths.home() / "outside-seatbelt-canary"
+    outside.unlink(missing_ok=True)
+    try:
+        first = sandbox.exec(
+            "cd ../../shared; printf inside > seatbelt-canary",
+            cwd=str(paths.profile_dir(env, "alice")),
+            timeout=10,
+            session="alice",
+        )
+        assert first.exit_code == 0
+        second = sandbox.exec("pwd", cwd=sandbox.env_root, timeout=10, session="alice")
+        assert second.output == str(paths.shared_dir(env).resolve())
+        denied = sandbox.exec(
+            f"printf outside > {shlex.quote(str(outside))}",
+            cwd=sandbox.env_root,
+            timeout=10,
+        )
+        assert denied.exit_code != 0
+        assert not outside.exists()
+        via_symlink = sandbox.exec(
+            f"ln -sf {shlex.quote(str(outside))} escape-canary; "
+            "printf outside > escape-canary",
+            cwd=sandbox.env_root,
+            timeout=10,
+        )
+        assert via_symlink.exit_code != 0
+        assert not outside.exists()
+    finally:
+        sandbox.stop()
+        outside.unlink(missing_ok=True)
 
 
 def test_agent_detail_exposes_exact_prompt_and_tool_payloads(env):
