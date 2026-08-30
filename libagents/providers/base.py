@@ -29,6 +29,10 @@ class ToolCall:
 @dataclass
 class Turn:
     items: list[dict] = field(default_factory=list)
+    compaction_items: list[dict] = field(default_factory=list)
+    """Server-side compaction checkpoints emitted during this turn. Opaque and
+    encrypted; everything before the first one can be dropped from the local
+    item list because these carry it forward."""
     tool_calls: list[ToolCall] = field(default_factory=list)
     text: str = ""
     reasoning: str = ""
@@ -48,6 +52,9 @@ def parse_arguments(raw: str) -> tuple[dict, str | None]:
 class Provider(Protocol):
     name: str
     model: str
+    native_compaction: bool
+    """Whether the provider compacts server-side. If not, the runner falls
+    back to asking the model to summarize its own context."""
 
     def generate(self, *, instructions: str, items: list[dict], tools: list[ToolSpec]) -> Turn: ...
     def user_item(self, text: str) -> dict: ...

@@ -84,6 +84,32 @@ back with the summary — `read_file` returns it verbatim, `read_summary` runs
 it through a cheap model. `read_file` is the one tool allowed to return a lot
 of text.
 
+### Compaction
+
+Where the provider compacts server-side, we use it. OpenAI's Responses API
+takes `context_management=[{"type": "compaction", "compact_threshold": N}]`
+and compacts in stream once the rendered context crosses `N`, returning
+opaque encrypted `compaction` items in the output. Those items subsume
+everything before them — verified directly: drop the original input, pass
+only the checkpoint forward, and the model still answers questions about the
+dropped content. This beats summarizing to text, because reasoning crosses
+the boundary encrypted instead of being flattened into prose.
+
+On receiving a checkpoint the runner drops every earlier item and re-adds the
+prefix, so `memory.md` still survives the boundary as promised. It refuses to
+cut when a `function_call` precedes the checkpoint in the same turn, which
+would strand its result.
+
+Providers without server-side compaction (OpenRouter) fall back to
+summarize-and-rebuild: ask the model to summarize its own context, then
+restart from goal + summary + `memory.md`. That is also the fallback if a
+model rejects `context_management`, and a backstop at 2× the threshold in
+case server-side compaction is not keeping up.
+
+Set `compact_at_input_tokens` well above the API floor of 1000. At the floor
+it compacts on nearly every turn, which thrashes: the checkpoint never
+amortises and prompt caching is destroyed. The default is 100k.
+
 `memory.md` has a hard character limit. An edit that would exceed it **fails**
 rather than truncating, with the overage in the error message, so the agent
 decides what to drop. A shell command can still bypass the tool, so injection
@@ -93,17 +119,18 @@ truncates with a visible `[TRUNCATED]` marker instead of failing the run.
 
 `openai` uses the Responses API statelessly (`store=False`) with
 `include=["reasoning.encrypted_content"]`, so reasoning survives across turns
-while we keep control of the item list. `openrouter` uses chat-completions;
-compaction there is purely manual, and `trim_to_valid_prefix` guarantees no
-assistant message ever loses its matching tool replies at the truncation seam.
+while we keep control of the item list, plus server-side compaction (above).
+`openrouter` uses chat-completions; compaction there is manual, and
+`trim_to_valid_prefix` guarantees no assistant message ever loses its matching
+tool replies at the truncation seam.
 
 Each provider keeps its own **native** item format in `conversation.json`. We
 deliberately do not normalise into a common shape — that is exactly how
 encrypted reasoning blocks and tool-call pairings get destroyed.
 
-Changing a runner's model forces a compaction on the next run and drops the
-reasoning items: encrypted reasoning is bound to the model that produced it.
-The UI says so when you save the change.
+Changing a runner's model forces a compaction on the next run and strips every
+encrypted item first: reasoning and compaction checkpoints are bound to the
+model that produced them. The UI says so when you save the change.
 
 ## Lifecycle
 

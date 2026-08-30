@@ -1,10 +1,20 @@
 """OpenAI Responses API.
 
 Stateless (`store=False`) with `include=["reasoning.encrypted_content"]`, so
-reasoning survives across turns while we keep full control of the item list --
-which is what makes compaction ours to define. Note that encrypted reasoning
-is bound to the model that produced it: swapping models forces a compaction
-(see `runner.compact`), it does not carry over.
+reasoning survives across turns while we keep control of the item list.
+
+Compaction is server-side: `context_management` makes the API compact in
+stream once the rendered context crosses the threshold, and the response
+carries back opaque encrypted `compaction` items. Those items subsume
+everything before them -- verified: dropping the original input and passing
+only the compaction items forward still answers questions about the dropped
+content. That is strictly better than summarizing to text, because reasoning
+crosses the boundary encrypted rather than being flattened into prose.
+
+If a model rejects `context_management`, the parameter is dropped and the
+runner falls back to summarize-and-rebuild. Note that encrypted state is bound
+to the model that produced it: swapping models forces a manual compaction, it
+does not carry over.
 """
 
 from __future__ import annotations
@@ -21,11 +31,15 @@ from .base import Provider, ToolCall, Turn, parse_arguments
 
 # Params we will drop one at a time if the model rejects them, so an unusual
 # model does not take the whole runner down.
-OPTIONAL_PARAMS = ["verbosity", "reasoning", "include", "temperature", "text"]
+OPTIONAL_PARAMS = ["context_management", "verbosity", "reasoning", "include", "temperature", "text"]
 
 
 class OpenAIProvider(Provider):
     name = "openai"
+    native_compaction = True
+
+    COMPACT_THRESHOLD_MIN = 1000
+    """The API's floor for compact_threshold."""
 
     def __init__(self, config: RunnerConfig):
         self.config = config
@@ -63,7 +77,22 @@ class OpenAIProvider(Provider):
             kwargs["include"] = ["reasoning.encrypted_content"]
         if self.config.temperature is not None and "temperature" not in self._disabled:
             kwargs["temperature"] = self.config.temperature
+        if self.uses_native_compaction:
+            kwargs["context_management"] = [
+                {
+                    "type": "compaction",
+                    "compact_threshold": max(
+                        self.COMPACT_THRESHOLD_MIN, self.config.compact_at_input_tokens
+                    ),
+                }
+            ]
         return kwargs
+
+    @property
+    def uses_native_compaction(self) -> bool:
+        """False once the model has rejected the parameter, so the runner can
+        take over with manual compaction."""
+        return self.config.native_compaction and "context_management" not in self._disabled
 
     def _create(self, kwargs: dict):
         for _ in range(len(OPTIONAL_PARAMS) + 1):
@@ -106,6 +135,8 @@ class OpenAIProvider(Provider):
                         parse_error=err,
                     )
                 )
+            elif data.get("type") == "compaction":
+                turn.compaction_items.append(data)
             elif data.get("type") == "reasoning":
                 parts = [s.get("text", "") for s in data.get("summary", []) if isinstance(s, dict)]
                 turn.reasoning = "\n".join(p for p in parts if p)
@@ -121,6 +152,9 @@ class OpenAIProvider(Provider):
     def summarize(self, *, instructions: str, items: list[dict], prompt: str) -> tuple[str, UsageRow]:
         kwargs = self._kwargs(instructions, items + [self.user_item(prompt)], [])
         kwargs.pop("include", None)
+        # A one-off summary of the full context: do not let the server compact
+        # the very thing we are asking the model to read.
+        kwargs.pop("context_management", None)
         if isinstance(kwargs.get("text"), dict):
             kwargs["text"]["verbosity"] = "medium"
         resp = self._create(kwargs)

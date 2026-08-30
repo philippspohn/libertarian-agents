@@ -12,6 +12,14 @@ Freezing the memory snapshot between compactions is what keeps prompt caching
 working: the prefix only ever changes at a compaction boundary, and
 everything else is appended. Volatile state (token budget, unread count)
 rides in on the STATUS line of each tool result, which is append-only too.
+
+Compaction itself comes in two flavours. Where the provider compacts
+server-side (OpenAI `context_management`), the response carries back opaque
+encrypted checkpoint items that subsume everything before them; we drop the
+older items and re-inject the prefix. That keeps reasoning encrypted across
+the boundary instead of flattening it to prose. Providers without it get
+summarize-and-rebuild, which is also the fallback if a model rejects the
+parameter.
 """
 
 from __future__ import annotations
@@ -139,6 +147,7 @@ class Runner:
                 "model_swap", old=f"{conv.provider}/{conv.model}",
                 new=f"{self.config.provider}/{self.config.model}",
             )
+            conv.items = self._strip_encrypted(conv.items)
             self._compact(conv, reason="model swap")
         if fresh or swapped or self.config.memoryless:
             conv.items = self._prefix(conv)
@@ -195,7 +204,7 @@ class Runner:
                 else:
                     self._grace -= 1
 
-            if conv.last_input_tokens > self.config.compact_at_input_tokens:
+            if self._needs_manual_compaction(conv):
                 self._compact(conv, reason="context threshold")
                 conv.items = self._prefix(conv) + [
                     self.provider.user_item("Context was compacted. Continue where you left off.")
@@ -224,6 +233,8 @@ class Runner:
             for call in turn.tool_calls:
                 output = self._execute(call)
                 conv.items.append(self.provider.tool_result_item(call, output))
+            if turn.compaction_items:
+                self._apply_native_compaction(conv, turn)
             conv.save(self.conv_path)
 
             if isinstance(self._pending, Sleep):
@@ -273,6 +284,56 @@ class Runner:
         self.used.cost_usd += usage.cost_usd
         self.events.emit("usage", **usage.model_dump())
 
+    def _native_compaction_active(self) -> bool:
+        return bool(getattr(self.provider, "native_compaction", False)) and bool(
+            getattr(self.provider, "uses_native_compaction", True)
+        )
+
+    def _needs_manual_compaction(self, conv: Conversation) -> bool:
+        threshold = self.config.compact_at_input_tokens
+        if not self._native_compaction_active():
+            return conv.last_input_tokens > threshold
+        # The server is handling it. Only step in if it is somehow not keeping
+        # up, so we never silently walk into the context limit.
+        return conv.last_input_tokens > 2 * threshold
+
+    def _apply_native_compaction(self, conv: Conversation, turn) -> None:
+        """The server emitted compaction checkpoints. They carry the earlier
+        context forward in encrypted form, so drop everything before the first
+        one and re-add the prefix -- memory.md is the piece we promise the
+        agent survives a boundary, and it is cheap to restate."""
+        target = turn.compaction_items[0]
+        preceding = turn.items[: turn.items.index(target)]
+        if any(i.get("type") == "function_call" for i in preceding):
+            # A tool call was emitted before the checkpoint and its result sits
+            # after it; cutting here would orphan one of the pair. Skip this
+            # turn -- the next checkpoint will land in a cleaner place.
+            return
+        cut = next((i for i, item in enumerate(conv.items) if item is target), None)
+        if cut is None:
+            return
+        dropped = cut
+        conv.items = conv.items[cut:] + self._prefix(conv)
+        conv.compactions += 1
+        conv.last_input_tokens = 0
+        self.events.emit(
+            "compaction",
+            reason="server-side",
+            native=True,
+            n=conv.compactions,
+            dropped_items=dropped,
+            summary="(opaque encrypted checkpoint; reasoning carried across the boundary)",
+        )
+
+    @staticmethod
+    def _strip_encrypted(items: list[dict]) -> list[dict]:
+        """Encrypted reasoning and compaction items are bound to the model that
+        produced them, so they must go before another model reads the history."""
+        return [
+            i for i in items
+            if i.get("type") not in ("reasoning", "compaction") and "encrypted_content" not in i
+        ]
+
     def _compact(self, conv: Conversation, reason: str) -> None:
         if not conv.items:
             return
@@ -289,7 +350,7 @@ class Runner:
         conv.summary = summary
         conv.compactions += 1
         conv.last_input_tokens = 0
-        self.events.emit("compaction", reason=reason, summary=summary, n=conv.compactions)
+        self.events.emit("compaction", reason=reason, native=False, summary=summary, n=conv.compactions)
 
     def _sleep(self, sleep: Sleep) -> str:
         wake_at = time.time() + sleep.seconds if sleep.seconds else None

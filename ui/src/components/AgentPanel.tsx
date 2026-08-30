@@ -24,7 +24,8 @@ function renderEvent(ev: any) {
     case "message":
       return ev.text;
     case "compaction":
-      return `── compacted (${ev.reason}) ──\n${ev.summary ?? ""}`;
+      return `── compacted ${ev.native ? "server-side" : "by summary"} (${ev.reason})`
+        + `${ev.dropped_items ? `, dropped ${ev.dropped_items} items` : ""} ──\n${ev.summary ?? ""}`;
     case "run_start":
       return `── run start: ${ev.reason} ──`;
     case "run_end":

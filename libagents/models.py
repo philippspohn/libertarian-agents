@@ -57,6 +57,11 @@ class RunnerConfig(BaseModel):
 
     # Context management
     compact_at_input_tokens: int = 100_000
+    native_compaction: bool = True
+    """Use the provider's server-side compaction where it has one (OpenAI
+    Responses `context_management`). It carries encrypted reasoning across the
+    boundary, which a text summary cannot. Falls back to summarize-and-rebuild
+    when the provider or model does not support it."""
     memory_char_limit: int = 6000
     memoryless: bool = False
     """Reset the whole conversation every time the agent sleeps. For cheap

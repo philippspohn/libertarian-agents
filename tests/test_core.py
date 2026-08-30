@@ -157,3 +157,88 @@ def test_runner_config_lives_outside_the_environment(env):
     )
     assert "input_tokens" not in blob
     assert control.get_runner(env, "alice").config.budgets.input_tokens > 0
+
+
+# -------------------------------------------------------------- compaction
+
+
+def _runner(env, **overrides):
+    from libagents.runner import Runner
+
+    control.upsert_runner(env, "alice", RunnerConfig(**overrides))
+    return Runner(env, "alice")
+
+
+def test_strip_encrypted_removes_model_bound_items():
+    from libagents.runner import Runner
+
+    items = [
+        {"role": "user", "content": "keep"},
+        {"type": "reasoning", "encrypted_content": "xx"},
+        {"type": "compaction", "encrypted_content": "yy"},
+        {"type": "function_call", "call_id": "1", "name": "shell"},
+    ]
+    kept = Runner._strip_encrypted(items)
+    assert [i.get("type", i.get("role")) for i in kept] == ["user", "function_call"]
+
+
+def test_native_compaction_cuts_at_the_checkpoint(env):
+    from libagents.providers.base import Turn
+    from libagents.runner import Conversation
+
+    r = _runner(env)
+    checkpoint = {"type": "compaction", "encrypted_content": "zz"}
+    turn = Turn(items=[checkpoint, {"type": "message"}], compaction_items=[checkpoint])
+    conv = Conversation(items=[{"role": "user", "content": "old"}] * 4 + turn.items)
+
+    r._apply_native_compaction(conv, turn)
+
+    assert conv.items[0] is checkpoint, "everything before the checkpoint must be dropped"
+    assert conv.compactions == 1 and conv.last_input_tokens == 0
+    # The prefix is re-added so memory.md survives the boundary.
+    tail = " ".join(str(i) for i in conv.items[-2:])
+    assert "PROJECT GOAL" in tail and "memory.md" in tail
+
+
+def test_native_compaction_refuses_to_orphan_a_tool_call(env):
+    """A checkpoint emitted after a function_call would leave its result
+    stranded, which the API rejects. Skip the cut instead."""
+    from libagents.providers.base import Turn
+    from libagents.runner import Conversation
+
+    r = _runner(env)
+    checkpoint = {"type": "compaction", "encrypted_content": "zz"}
+    turn = Turn(
+        items=[{"type": "function_call", "call_id": "c1", "name": "shell"}, checkpoint],
+        compaction_items=[checkpoint],
+    )
+    conv = Conversation(items=[{"role": "user", "content": "old"}] + turn.items)
+    r._apply_native_compaction(conv, turn)
+    assert conv.compactions == 0
+    assert conv.items[0] == {"role": "user", "content": "old"}
+
+
+def test_manual_compaction_only_backstops_the_native_path(env):
+    from libagents.runner import Conversation
+
+    native = _runner(env, compact_at_input_tokens=1000, native_compaction=True)
+    assert native._native_compaction_active()
+    assert not native._needs_manual_compaction(Conversation(last_input_tokens=1500))
+    assert native._needs_manual_compaction(Conversation(last_input_tokens=2500)), "backstop"
+
+    manual = _runner(env, compact_at_input_tokens=1000, native_compaction=False)
+    assert not manual._native_compaction_active()
+    assert manual._needs_manual_compaction(Conversation(last_input_tokens=1500))
+
+
+def test_openai_provider_sends_context_management():
+    from libagents.providers.openai_provider import OpenAIProvider
+
+    p = OpenAIProvider(RunnerConfig(compact_at_input_tokens=50_000))
+    kwargs = p._kwargs("sys", [], [])
+    assert kwargs["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
+    # The API floor is respected, and a rejection disables it cleanly.
+    low = OpenAIProvider(RunnerConfig(compact_at_input_tokens=10))
+    assert low._kwargs("sys", [], [])["context_management"][0]["compact_threshold"] == 1000
+    p._disabled.add("context_management")
+    assert not p.uses_native_compaction and "context_management" not in p._kwargs("sys", [], [])

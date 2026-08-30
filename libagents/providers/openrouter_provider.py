@@ -38,6 +38,7 @@ def trim_to_valid_prefix(items: list[dict]) -> list[dict]:
 
 class OpenRouterProvider(Provider):
     name = "openrouter"
+    native_compaction = False
 
     def __init__(self, config: RunnerConfig):
         self.config = config
