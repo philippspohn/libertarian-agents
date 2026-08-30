@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -577,13 +577,15 @@ def usage(env: str) -> dict:
 
 
 @app.get("/api/envs/{env}/stream")
-async def stream(env: str, after: int = Query(0)) -> StreamingResponse:
+async def stream(request: Request, env: str, after: int = Query(0)) -> StreamingResponse:
     """Poll-backed SSE: new board messages and agent state changes."""
 
     async def gen():
         last_msg = after
         last_state: dict[str, Any] = {}
         while True:
+            if await request.is_disconnected():
+                break
             try:
                 board = Board(paths.board_db(env))
                 msgs = board.recent(limit=100, after=last_msg)

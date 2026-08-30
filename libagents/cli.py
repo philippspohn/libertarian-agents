@@ -326,7 +326,15 @@ def serve(host: str = "127.0.0.1", port: int = 8848, reload: bool = False):
     """Run the web UI and API."""
     import uvicorn
 
-    uvicorn.run("libagents.api:app", host=host, port=port, reload=reload)
+    # The UI keeps an SSE connection open. Bound graceful shutdown so an open
+    # browser tab cannot make Ctrl-C leave the old server holding the port.
+    uvicorn.run(
+        "libagents.api:app",
+        host=host,
+        port=port,
+        reload=reload,
+        timeout_graceful_shutdown=5,
+    )
 
 
 if __name__ == "__main__":
