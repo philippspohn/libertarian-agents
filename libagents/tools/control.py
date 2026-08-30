@@ -28,8 +28,8 @@ def sleep(ctx: AgentContext, args: dict) -> ToolResult:
     "finish",
     """
     Declare yourself done. You cannot be woken by messages afterwards -- only
-    the operator can restart you. Prefer sleep() if there is any chance you
-    are still useful.
+    the operator can restart you. Use sleep() if other agents might still need
+    you.
     """,
     obj({"summary": {"type": "string", "description": "What you accomplished."}}),
     ends_turn=True,

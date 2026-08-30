@@ -34,6 +34,17 @@ from .base import Provider, ToolCall, Turn, parse_arguments
 OPTIONAL_PARAMS = ["context_management", "verbosity", "reasoning", "include", "temperature", "text"]
 
 
+def tool_payload(spec: ToolSpec) -> dict[str, Any]:
+    if spec.name == "web_search":
+        return {"type": "web_search"}
+    return {
+        "type": "function",
+        "name": spec.name,
+        "description": spec.description,
+        "parameters": spec.parameters,
+    }
+
+
 class OpenAIProvider(Provider):
     name = "openai"
     native_compaction = True
@@ -49,7 +60,10 @@ class OpenAIProvider(Provider):
 
     # ------------------------------------------------------------------ api
 
-    def _kwargs(self, instructions: str, items: list[dict], tools: list[ToolSpec]) -> dict:
+    def _kwargs(
+        self, instructions: str, items: list[dict], tools: list[ToolSpec],
+        max_output_tokens: int | None = None,
+    ) -> dict:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "instructions": instructions,
@@ -57,15 +71,11 @@ class OpenAIProvider(Provider):
             "store": False,
         }
         if tools:
-            kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
-                for t in tools
-            ]
+            # web_search is hosted by OpenAI inside this same Responses
+            # request. No delegated helper-model call is involved.
+            kwargs["tools"] = [tool_payload(t) for t in tools]
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max(1, max_output_tokens)
         if "text" not in self._disabled:
             text: dict[str, Any] = {"format": {"type": "text"}}
             if self.config.verbosity and "verbosity" not in self._disabled:
@@ -92,7 +102,7 @@ class OpenAIProvider(Provider):
     def uses_native_compaction(self) -> bool:
         """False once the model has rejected the parameter, so the runner can
         take over with manual compaction."""
-        return self.config.native_compaction and "context_management" not in self._disabled
+        return "context_management" not in self._disabled
 
     def _create(self, kwargs: dict):
         for _ in range(len(OPTIONAL_PARAMS) + 1):
@@ -118,8 +128,11 @@ class OpenAIProvider(Provider):
 
     # -------------------------------------------------------------- protocol
 
-    def generate(self, *, instructions: str, items: list[dict], tools: list[ToolSpec]) -> Turn:
-        resp = self._create(self._kwargs(instructions, items, tools))
+    def generate(
+        self, *, instructions: str, items: list[dict], tools: list[ToolSpec],
+        max_output_tokens: int | None = None,
+    ) -> Turn:
+        resp = self._create(self._kwargs(instructions, items, tools, max_output_tokens))
         turn = Turn(usage=usage_from_response(self.model, resp.usage))
         for item in resp.output or []:
             data = item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else dict(item)
@@ -140,6 +153,8 @@ class OpenAIProvider(Provider):
             elif data.get("type") == "reasoning":
                 parts = [s.get("text", "") for s in data.get("summary", []) if isinstance(s, dict)]
                 turn.reasoning = "\n".join(p for p in parts if p)
+            elif data.get("type") == "web_search_call":
+                turn.hosted_tools.append("web_search")
         turn.text = (resp.output_text or "").strip()
         return turn
 
@@ -149,8 +164,13 @@ class OpenAIProvider(Provider):
     def tool_result_item(self, call: ToolCall, output: str) -> dict:
         return {"type": "function_call_output", "call_id": call.call_id, "output": output}
 
-    def summarize(self, *, instructions: str, items: list[dict], prompt: str) -> tuple[str, UsageRow]:
-        kwargs = self._kwargs(instructions, items + [self.user_item(prompt)], [])
+    def summarize(
+        self, *, instructions: str, items: list[dict], prompt: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str, UsageRow]:
+        kwargs = self._kwargs(
+            instructions, items + [self.user_item(prompt)], [], max_output_tokens
+        )
         kwargs.pop("include", None)
         # A one-off summary of the full context: do not let the server compact
         # the very thing we are asking the model to read.

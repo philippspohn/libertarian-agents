@@ -88,6 +88,22 @@ def read_history(ctx: AgentContext, args: dict) -> ToolResult:
 )
 def join_channel(ctx: AgentContext, args: dict) -> ToolResult:
     name = args["channel"].lstrip("#")
+    if not name:
+        raise ToolError("channel name cannot be empty")
     ctx.board.ensure_channel(name, args.get("topic", ""), by=ctx.profile)
     ctx.board.subscribe(ctx.profile, name)
     return ToolResult(f"joined #{name}")
+
+
+@tool(
+    "leave_channel",
+    "Leave a channel. You stop receiving its messages in your inbox; the channel and its history remain.",
+    obj({"channel": {"type": "string"}}, ["channel"]),
+)
+def leave_channel(ctx: AgentContext, args: dict) -> ToolResult:
+    name = args["channel"].lstrip("#")
+    if not name:
+        raise ToolError("channel name cannot be empty")
+    if not ctx.board.unsubscribe(ctx.profile, name):
+        return ToolResult(f"not subscribed to #{name}")
+    return ToolResult(f"left #{name}")

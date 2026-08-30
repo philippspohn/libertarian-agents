@@ -10,10 +10,11 @@ policy lives here, once, rather than in each tool.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import prompts
 from ..board import Board
 from ..events import EventLog
 from ..models import EnvConfig, RunnerConfig, UsageRow
@@ -63,10 +64,12 @@ class AgentContext:
 
     def status_line(self) -> str:
         b = self.config.budgets
-        return (
-            f"STATUS tokens_in={self.used.input_tokens}/{b.input_tokens} "
-            f"tokens_out={self.used.output_tokens}/{b.output_tokens} "
-            f"unread={self.board.unread_count(self.profile)}"
+        return prompts.STATUS.format(
+            input_tokens=self.used.input_tokens,
+            input_budget=b.input_tokens,
+            output_tokens=self.used.output_tokens,
+            output_budget=b.output_tokens,
+            unread=self.board.unread_count(self.profile),
         )
 
     @property
@@ -82,7 +85,7 @@ class AgentContext:
         return self.mapper.to_env(fp)
 
     def add_usage(self, model: str, usage: UsageRow) -> None:
-        """Fold in tokens spent by helper calls (read_summary, web_search) so
+        """Fold in tokens spent by helper calls (currently read_summary) so
         they count against the same budget as the agent's own turns."""
         from .. import control
 
@@ -91,11 +94,18 @@ class AgentContext:
         self.used.output_tokens += usage.output_tokens
         self.used.reasoning_tokens += usage.reasoning_tokens
         self.used.cost_usd += usage.cost_usd
+        self.used.cost_known = self.used.cost_known and usage.cost_known
         control.record_usage(self.env, self.profile, model, usage)
 
     def cwd(self) -> str:
         """Sandbox-side working directory for shell commands."""
         return self.mapper.to_env(self.profile_dir)
+
+    def output_allowance(self, cap: int) -> int:
+        remaining = self.config.budgets.output_tokens - self.used.output_tokens
+        if remaining <= 0:
+            raise ToolError("output token budget exhausted")
+        return max(1, min(cap, remaining))
 
 
 @dataclass
@@ -133,11 +143,18 @@ def compress(text: str, head: int, tail: int, line_chars: int) -> tuple[str, boo
     if not lines:
         return "", False
 
+    clipped = False
+
     def clip(ln: str) -> str:
-        return ln if len(ln) <= line_chars else ln[:line_chars] + " ...[clipped]"
+        nonlocal clipped
+        if len(ln) > line_chars:
+            clipped = True
+            return ln[:line_chars] + " ...[clipped]"
+        return ln
 
     if len(lines) <= head + tail:
-        return "\n".join(clip(ln) for ln in lines), False
+        shown = "\n".join(clip(ln) for ln in lines)
+        return shown, clipped
     shown = [clip(ln) for ln in lines[:head]]
     shown.append(f"... [{len(lines) - head - tail} more lines] ...")
     shown += [clip(ln) for ln in lines[-tail:]]
@@ -149,9 +166,15 @@ def load_all() -> None:
     from . import control, files, messaging, shell, web  # noqa: F401
 
 
-def specs_for(names: list[str]) -> list[ToolSpec]:
+def specs_for(names: list[str], description_overrides: dict[str, str] | None = None) -> list[ToolSpec]:
     load_all()
     missing = [n for n in names if n not in REGISTRY]
     if missing:
         raise KeyError(f"unknown tools: {', '.join(missing)}")
-    return [REGISTRY[n] for n in names]
+    overrides = description_overrides or {}
+    return [
+        replace(REGISTRY[n], description=overrides[n].strip())
+        if overrides.get(n, "").strip()
+        else REGISTRY[n]
+        for n in names
+    ]

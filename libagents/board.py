@@ -12,6 +12,7 @@ advances it; `read_history` never does.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -134,6 +135,13 @@ class Board:
             self._register(c, name, "", state)
             c.execute("INSERT OR IGNORE INTO subscriptions VALUES (?, 'general')", (name,))
 
+    def unregister(self, name: str) -> None:
+        """Remove live board identity while preserving historical messages."""
+        with self._conn() as c:
+            c.execute("DELETE FROM subscriptions WHERE agent=?", (name,))
+            c.execute("DELETE FROM cursors WHERE agent=?", (name,))
+            c.execute("DELETE FROM agents WHERE name=?", (name,))
+
     def set_status(self, name: str, status: Optional[str] = None, state: Optional[str] = None) -> None:
         with self._conn() as c:
             row = c.execute("SELECT status, state FROM agents WHERE name=?", (name,)).fetchone()
@@ -165,6 +173,14 @@ class Board:
         with self._conn() as c:
             c.execute("INSERT OR IGNORE INTO subscriptions VALUES (?,?)", (agent, channel.lstrip("#")))
 
+    def unsubscribe(self, agent: str, channel: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM subscriptions WHERE agent=? AND channel=?",
+                (agent, channel.lstrip("#")),
+            )
+            return cur.rowcount > 0
+
     def list_channels(self) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
@@ -174,6 +190,13 @@ class Board:
                    FROM channels ch ORDER BY ch.name"""
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def subscribers(self, channel: str) -> set[str]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT agent FROM subscriptions WHERE channel=?", (channel.lstrip("#"),)
+            ).fetchall()
+        return {r["agent"] for r in rows}
 
     # -------------------------------------------------------------- messages
 
@@ -194,11 +217,12 @@ class Board:
         stored = body
         if truncated and spill_dir is not None:
             spill_dir.mkdir(parents=True, exist_ok=True)
-            with self._conn() as c:
-                nxt = (c.execute("SELECT COALESCE(MAX(id),0)+1 n FROM messages").fetchone()["n"])
-            fp = spill_dir / f"message-{nxt}.txt"
-            fp.write_text(body)
-            spill_path = str(fp)
+            fp = spill_dir / f"message-{uuid.uuid4().hex[:12]}.txt"
+            fp.write_text(body, encoding="utf-8")
+            try:
+                spill_path = str(fp.resolve().relative_to(self.path.parent.parent.resolve()))
+            except ValueError as exc:
+                raise ValueError("spill directory must be inside the environment") from exc
             stored = body[:max_chars] + f"\n... [truncated, {len(body)} chars total]"
         elif truncated:
             stored = body[:max_chars] + "\n... [truncated]"

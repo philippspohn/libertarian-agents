@@ -17,6 +17,26 @@ from ..tools.base import ToolSpec
 from .base import Provider, ToolCall, Turn, parse_arguments
 
 
+def tool_payload(spec: ToolSpec) -> dict[str, Any]:
+    if spec.name == "web_search":
+        return {
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "auto",
+                "max_results": 5,
+                "max_total_results": 10,
+            },
+        }
+    return {
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": spec.parameters,
+        },
+    }
+
+
 def trim_to_valid_prefix(items: list[dict]) -> list[dict]:
     """Drop trailing tool calls whose results are missing, and leading tool
     results whose call is missing."""
@@ -48,32 +68,35 @@ class OpenRouterProvider(Provider):
     def _messages(self, instructions: str, items: list[dict]) -> list[dict]:
         return [{"role": "system", "content": instructions}] + trim_to_valid_prefix(items)
 
-    def _call(self, instructions: str, items: list[dict], tools: list[ToolSpec]):
+    def _call(
+        self, instructions: str, items: list[dict], tools: list[ToolSpec],
+        max_output_tokens: int | None = None,
+    ):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._messages(instructions, items),
         }
         if tools:
-            kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                }
-                for t in tools
-            ]
+            kwargs["tools"] = [tool_payload(t) for t in tools]
             kwargs["tool_choice"] = "auto"
+        if max_output_tokens is not None:
+            kwargs["max_tokens"] = max(1, max_output_tokens)
         if self.config.temperature is not None:
             kwargs["temperature"] = self.config.temperature
+        extra: dict[str, Any] = {}
         if self.config.reasoning_effort:
-            kwargs["extra_body"] = {"reasoning": {"effort": self.config.reasoning_effort}}
+            extra["reasoning"] = {"effort": self.config.reasoning_effort}
+        if any(t.name == "web_search" for t in tools):
+            extra["max_tool_calls"] = 3
+        if extra:
+            kwargs["extra_body"] = extra
         return self.client.chat.completions.create(**kwargs)
 
-    def generate(self, *, instructions: str, items: list[dict], tools: list[ToolSpec]) -> Turn:
-        resp = self._call(instructions, items, tools)
+    def generate(
+        self, *, instructions: str, items: list[dict], tools: list[ToolSpec],
+        max_output_tokens: int | None = None,
+    ) -> Turn:
+        resp = self._call(instructions, items, tools, max_output_tokens)
         choice = resp.choices[0]
         msg = choice.message
         turn = Turn(usage=usage_from_response(self.model, resp.usage))
@@ -96,6 +119,13 @@ class OpenRouterProvider(Provider):
         turn.items.append(assistant)
         turn.text = (msg.content or "").strip()
         turn.reasoning = (getattr(msg, "reasoning", None) or "") if hasattr(msg, "reasoning") else ""
+        server_use = getattr(resp.usage, "server_tool_use", None)
+        searches = (
+            server_use.get("web_search_requests", 0)
+            if isinstance(server_use, dict)
+            else getattr(server_use, "web_search_requests", 0)
+        ) or 0
+        turn.hosted_tools.extend(["web_search"] * searches)
         return turn
 
     def user_item(self, text: str) -> dict:
@@ -104,6 +134,11 @@ class OpenRouterProvider(Provider):
     def tool_result_item(self, call: ToolCall, output: str) -> dict:
         return {"role": "tool", "tool_call_id": call.call_id, "content": output}
 
-    def summarize(self, *, instructions: str, items: list[dict], prompt: str) -> tuple[str, UsageRow]:
-        resp = self._call(instructions, items + [self.user_item(prompt)], [])
+    def summarize(
+        self, *, instructions: str, items: list[dict], prompt: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str, UsageRow]:
+        resp = self._call(
+            instructions, items + [self.user_item(prompt)], [], max_output_tokens
+        )
         return (resp.choices[0].message.content or "").strip(), usage_from_response(self.model, resp.usage)

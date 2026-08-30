@@ -23,6 +23,33 @@ from .runner import Runner
 POLL_SECONDS = 1.0
 
 
+class BudgetLimitError(RuntimeError):
+    """The runner cannot resume until an operator raises its absolute cap."""
+
+
+def budget_limit_reason(env: str, profile: str) -> str | None:
+    runner = control.get_runner(env, profile)
+    used = control.usage_for(env, profile)
+    if used.input_tokens >= runner.config.budgets.input_tokens:
+        return (
+            f"input budget exhausted ({used.input_tokens}/{runner.config.budgets.input_tokens}); "
+            "raise the runner limit before restarting"
+        )
+    if used.output_tokens >= runner.config.budgets.output_tokens:
+        return (
+            f"output budget exhausted ({used.output_tokens}/{runner.config.budgets.output_tokens}); "
+            "raise the runner limit before restarting"
+        )
+    env_cap = control.get_env(env).input_token_cap
+    env_used = control.usage_for(env).input_tokens
+    if env_cap is not None and env_used >= env_cap:
+        return (
+            f"environment input cap reached ({env_used}/{env_cap}); "
+            "raise the environment cap before restarting"
+        )
+    return None
+
+
 class ProfileLock:
     """Cross-process guard: at most one runner may instantiate a profile."""
 
@@ -87,6 +114,10 @@ class Supervisor:
         return bool(h and h.thread.is_alive())
 
     def start(self, env: str, profile: str, reason: str = "started by operator") -> None:
+        control.get_runner(env, profile)
+        blocked = budget_limit_reason(env, profile)
+        if blocked:
+            raise BudgetLimitError(blocked)
         with self._lock:
             existing = self._handles.get((env, profile))
             if existing and existing.thread.is_alive():
@@ -108,18 +139,26 @@ class Supervisor:
             self._handles[(env, profile)] = handle
         thread.start()
 
-    def stop(self, env: str, profile: str, *, join: float = 0.0) -> None:
+    def stop(self, env: str, profile: str, *, join: float = 0.0) -> bool:
         with self._lock:
             handle = self._handles.get((env, profile))
         if not handle:
             control.set_state(env, profile, "inactive", stop_reason="stopped by operator")
-            return
+            try:
+                Board(paths.board_db(env)).set_status(profile, state="inactive")
+            except Exception:
+                pass
+            return True
         handle.stop_flag.set()
         handle.wake_flag.set()
         if join:
             handle.thread.join(timeout=join)
+        return not handle.thread.is_alive()
 
     def wake(self, env: str, profile: str, reason: str = "woken by operator") -> None:
+        blocked = budget_limit_reason(env, profile)
+        if blocked:
+            raise BudgetLimitError(blocked)
         with self._lock:
             handle = self._handles.get((env, profile))
         if handle and handle.thread.is_alive():
@@ -128,13 +167,31 @@ class Supervisor:
             return
         try:
             self.start(env, profile, reason)
+        except BudgetLimitError:
+            raise
         except RuntimeError:
             pass  # already running, here or in another process
 
-    def stop_env(self, env: str) -> None:
-        for (e, p) in list(self._handles):
-            if e == env:
-                self.stop(e, p)
+    def stop_env(self, env: str, *, join: float = 0.0) -> list[str]:
+        with self._lock:
+            handles = [h for (e, _), h in self._handles.items() if e == env]
+        for handle in handles:
+            handle.stop_flag.set()
+            handle.wake_flag.set()
+        if join:
+            deadline = time.time() + join
+            for handle in handles:
+                handle.thread.join(timeout=max(0.0, deadline - time.time()))
+        remaining = [h.profile for h in handles if h.thread.is_alive()]
+        board = Board(paths.board_db(env))
+        for runner in control.list_runners(env):
+            if runner.profile not in remaining and not self.is_running(env, runner.profile):
+                if runner.state != "finished":
+                    control.set_state(
+                        env, runner.profile, "inactive", stop_reason="environment stopped by operator"
+                    )
+                    board.set_status(runner.profile, state="inactive")
+        return remaining
 
     def running(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -148,6 +205,11 @@ class Supervisor:
         reason = handle.wake_reason
         try:
             while not handle.stop_flag.is_set():
+                blocked = budget_limit_reason(env, profile)
+                if blocked:
+                    control.set_state(env, profile, "finished", stop_reason=blocked)
+                    board.set_status(profile, status=blocked[:200], state="finished")
+                    return
                 try:
                     state = Runner(env, profile, stop_flag=handle.stop_flag).run(reason)
                 except Exception as exc:
@@ -162,6 +224,12 @@ class Supervisor:
                     board.set_status(profile, state="inactive")
                     return
         finally:
+            if handle.stop_flag.is_set():
+                try:
+                    control.set_state(env, profile, "inactive", stop_reason="stopped by operator")
+                    board.set_status(profile, state="inactive")
+                except Exception:
+                    pass
             handle.lock.release()
             with self._lock:
                 if self._handles.get((env, profile)) is handle:
@@ -171,8 +239,6 @@ class Supervisor:
         """Block until a message arrives, the timeout expires, or we are
         stopped. Returns the wake reason, or None if stopped."""
         env, profile = handle.env, handle.profile
-        baseline = board.max_id()
-        handle.wake_flag.clear()
         while True:
             if handle.stop_flag.is_set():
                 return None
@@ -187,7 +253,7 @@ class Supervisor:
                 return None
             if runner.wake_at and time.time() >= runner.wake_at:
                 return "sleep timeout expired"
-            n = board.unread_count(profile, after=baseline)
+            n = board.unread_count(profile, after=runner.wake_after_id)
             if n:
                 return f"{n} new message(s)"
             time.sleep(POLL_SECONDS)
@@ -226,7 +292,7 @@ class Supervisor:
                         self.start(env, r.profile, "sleep timeout expired")
                         continue
                     board = board or Board(paths.board_db(env))
-                    if board.unread_count(r.profile):
+                    if board.unread_count(r.profile, after=r.wake_after_id):
                         self.start(env, r.profile, "new message")
                 except RuntimeError:
                     pass  # locked by another process

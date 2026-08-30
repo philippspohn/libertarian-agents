@@ -2,8 +2,8 @@
 
 Context layout, in order, and why:
 
-    instructions          static; the cached prefix (AGENT.md folded in)
-    [user] PROJECT GOAL   static
+    instructions          static; the cached operator-controlled prefix
+    [user] AGENT GOAL     static
     [user] COMPACTED CTX  rewritten only at a compaction
     [user] memory.md      snapshot taken at the last compaction, then frozen
     ... everything since the last compaction
@@ -53,6 +53,7 @@ class Conversation:
     summary: Optional[str] = None
     compactions: int = 0
     last_input_tokens: int = 0
+    goal: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "Conversation":
@@ -87,7 +88,9 @@ class Runner:
         self.conv_path = paths.history_dir(env, profile) / "conversation.json"
 
         self.provider = make_provider(self.config)
-        self.tools: list[ToolSpec] = specs_for(self.config.tools)
+        self.tools: list[ToolSpec] = specs_for(
+            self.config.tools, self.config.tool_description_overrides
+        )
         self.used = control.usage_for(env, profile)
         self.ctx = AgentContext(
             env=env,
@@ -103,17 +106,20 @@ class Runner:
         )
         self._pending: Optional[Exception] = None
         self._grace = -1
+        self._instructions_snapshot: Optional[str] = None
 
     # ----------------------------------------------------------- prompt bits
 
     def instructions(self) -> str:
-        am = paths.agent_md(self.env, self.profile)
         return prompts.instructions(
             self.profile,
             self.sandbox.env_root,
             self.config.memory_char_limit,
-            am.read_text(encoding="utf-8") if am.exists() else "",
+            self.config.base_prompt_override,
         )
+
+    def _instructions_for_run(self) -> str:
+        return self._instructions_snapshot or self.instructions()
 
     def _memory_text(self) -> str:
         mem = paths.memory_file(self.env, self.profile)
@@ -126,7 +132,7 @@ class Runner:
         return text
 
     def _prefix(self, conv: Conversation) -> list[dict]:
-        items = [self.provider.user_item(prompts.GOAL_BLOCK.format(goal=self.env_config.goal or "(none)"))]
+        items = [self.provider.user_item(prompts.GOAL_BLOCK.format(goal=self.config.goal or "(none)"))]
         if conv.summary:
             items.append(self.provider.user_item(prompts.COMPACTION_BLOCK.format(summary=conv.summary)))
         items.append(self.provider.user_item(prompts.MEMORY_BLOCK.format(memory=self._memory_text())))
@@ -141,16 +147,28 @@ class Runner:
             conv.provider != self.config.provider or conv.model != self.config.model
         )
         if swapped:
-            # Encrypted reasoning is bound to the model that produced it, and
-            # item shapes differ per provider. Compact, then start clean.
+            # Ask the model/provider that produced this native conversation to
+            # summarize it before switching. This is the only safe reader for
+            # encrypted reasoning and provider-specific item shapes.
             self.events.emit(
                 "model_swap", old=f"{conv.provider}/{conv.model}",
                 new=f"{self.config.provider}/{self.config.model}",
             )
-            conv.items = self._strip_encrypted(conv.items)
-            self._compact(conv, reason="model swap")
+            old_config = self.config.model_copy(
+                update={"provider": conv.provider, "model": conv.model}
+            )
+            self._compact(conv, reason="model swap", provider=make_provider(old_config))
         if fresh or swapped or self.config.memoryless:
             conv.items = self._prefix(conv)
+        elif conv.goal != self.config.goal:
+            # Keep the stored provider-native history append-only. Rewriting
+            # its first item would invalidate tool/checkpoint ordering.
+            conv.items.append(
+                self.provider.user_item(
+                    prompts.GOAL_UPDATE_BLOCK.format(goal=self.config.goal or "(none)")
+                )
+            )
+        conv.goal = self.config.goal
         conv.provider, conv.model = self.config.provider, self.config.model
         return conv
 
@@ -166,6 +184,9 @@ class Runner:
         return None
 
     def run(self, wake_reason: str = "started") -> str:
+        # Freeze host-controlled instructions for this wake so the prefix
+        # remains byte-identical and prompt-cacheable.
+        self._instructions_snapshot = self.instructions()
         self.sandbox.start()
         self.board.register(self.profile, state="active")
         self.board.set_status(self.profile, state="active")
@@ -195,23 +216,30 @@ class Runner:
 
             reason = self._over_budget()
             if reason:
+                if reason == "output token budget exhausted":
+                    raise BudgetExhausted(reason)
                 if self._grace < 0:
                     self._grace = GRACE_STEPS
                     conv.items.append(self.provider.user_item(prompts.BUDGET_EXHAUSTED))
                     self.events.emit("budget_exhausted", reason=reason)
-                elif self._grace == 0:
+                if self._grace == 0:
                     raise BudgetExhausted(reason)
-                else:
-                    self._grace -= 1
+                self._grace -= 1
 
             if self._needs_manual_compaction(conv):
                 self._compact(conv, reason="context threshold")
                 conv.items = self._prefix(conv) + [
-                    self.provider.user_item("Context was compacted. Continue where you left off.")
+                    self.provider.user_item(prompts.CONTEXT_COMPACTED)
                 ]
 
             turn = self.provider.generate(
-                instructions=self.instructions(), items=conv.items, tools=self.tools
+                instructions=self._instructions_for_run(),
+                items=conv.items,
+                tools=self.tools,
+                # Grace turns exist only to let an agent save work and exit.
+                # Keep each one small even when the profile has a large output
+                # allocation remaining.
+                max_output_tokens=self._output_allowance(2000 if self._grace >= 0 else None),
             )
             self._record(turn.usage)
             conv.last_input_tokens = turn.usage.input_tokens
@@ -220,6 +248,8 @@ class Runner:
                 self.events.emit("reasoning", text=turn.reasoning)
             if turn.text:
                 self.events.emit("message", text=turn.text)
+            for hosted_tool in turn.hosted_tools:
+                self.events.emit("hosted_tool", tool=hosted_tool, provider=self.config.provider)
 
             if not turn.tool_calls:
                 nudges += 1
@@ -275,14 +305,21 @@ class Runner:
 
     # ----------------------------------------------------------- bookkeeping
 
-    def _record(self, usage: UsageRow) -> None:
-        control.record_usage(self.env, self.profile, self.config.model, usage)
+    def _record(self, usage: UsageRow, model: str | None = None) -> None:
+        control.record_usage(self.env, self.profile, model or self.config.model, usage)
         self.used.input_tokens += usage.input_tokens
         self.used.cached_input_tokens += usage.cached_input_tokens
         self.used.output_tokens += usage.output_tokens
         self.used.reasoning_tokens += usage.reasoning_tokens
         self.used.cost_usd += usage.cost_usd
+        self.used.cost_known = self.used.cost_known and usage.cost_known
         self.events.emit("usage", **usage.model_dump())
+
+    def _output_allowance(self, cap: Optional[int] = None) -> int:
+        remaining = self.config.budgets.output_tokens - self.used.output_tokens
+        if remaining <= 0:
+            raise BudgetExhausted("output token budget exhausted")
+        return max(1, min(remaining, cap)) if cap is not None else remaining
 
     def _native_compaction_active(self) -> bool:
         return bool(getattr(self.provider, "native_compaction", False)) and bool(
@@ -302,8 +339,9 @@ class Runner:
         context forward in encrypted form, so drop everything before the first
         one and re-add the prefix -- memory.md is the piece we promise the
         agent survives a boundary, and it is cheap to restate."""
-        target = turn.compaction_items[0]
-        preceding = turn.items[: turn.items.index(target)]
+        target = turn.compaction_items[-1]
+        target_index = next(i for i, item in enumerate(turn.items) if item is target)
+        preceding = turn.items[:target_index]
         if any(i.get("type") == "function_call" for i in preceding):
             # A tool call was emitted before the checkpoint and its result sits
             # after it; cutting here would orphan one of the pair. Skip this
@@ -313,7 +351,12 @@ class Runner:
         if cut is None:
             return
         dropped = cut
-        conv.items = conv.items[cut:] + self._prefix(conv)
+        # OpenAI's stateless chaining guidance says to preserve the compaction
+        # item and every later output item in order. Goal and memory are then
+        # appended as fresh application input; they must not be moved ahead of
+        # or inserted into the server-produced sequence.
+        retained = conv.items[cut:]
+        conv.items = retained + self._prefix(conv)
         conv.compactions += 1
         conv.last_input_tokens = 0
         self.events.emit(
@@ -325,25 +368,18 @@ class Runner:
             summary="(opaque encrypted checkpoint; reasoning carried across the boundary)",
         )
 
-    @staticmethod
-    def _strip_encrypted(items: list[dict]) -> list[dict]:
-        """Encrypted reasoning and compaction items are bound to the model that
-        produced them, so they must go before another model reads the history."""
-        return [
-            i for i in items
-            if i.get("type") not in ("reasoning", "compaction") and "encrypted_content" not in i
-        ]
-
-    def _compact(self, conv: Conversation, reason: str) -> None:
+    def _compact(self, conv: Conversation, reason: str, provider=None) -> None:
         if not conv.items:
             return
+        summarizer = provider or self.provider
         try:
-            summary, usage = self.provider.summarize(
-                instructions=self.instructions(),
+            summary, usage = summarizer.summarize(
+                instructions=self._instructions_for_run(),
                 items=conv.items,
                 prompt=prompts.COMPACTION_PROMPT,
+                max_output_tokens=self._output_allowance(2000),
             )
-            self._record(usage)
+            self._record(usage, getattr(summarizer, "model", self.config.model))
         except Exception as exc:
             self.events.emit("error", message=f"compaction failed: {exc}")
             summary = conv.summary or "(compaction failed; context was dropped)"
@@ -353,10 +389,20 @@ class Runner:
         self.events.emit("compaction", reason=reason, native=False, summary=summary, n=conv.compactions)
 
     def _sleep(self, sleep: Sleep) -> str:
+        # Capture the boundary before publishing `waiting`. Any message sent
+        # after this point has an id above the baseline and cannot be lost in
+        # the handoff from Runner to Supervisor.
+        wake_after_id = self.board.max_id()
         wake_at = time.time() + sleep.seconds if sleep.seconds else None
         status = sleep.status or ("sleeping" if wake_at is None else f"sleeping {sleep.seconds:.0f}s")
         self.board.set_status(self.profile, status=status, state="waiting")
-        control.set_state(self.env, self.profile, "waiting", wake_at=wake_at)
+        control.set_state(
+            self.env,
+            self.profile,
+            "waiting",
+            wake_at=wake_at,
+            wake_after_id=wake_after_id,
+        )
         self.events.emit("sleep", seconds=sleep.seconds, status=status)
         if self.config.memoryless:
             # Reset context so the next wake starts from goal + memory.md only.

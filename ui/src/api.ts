@@ -4,6 +4,7 @@ export interface Usage {
   output_tokens: number;
   reasoning_tokens: number;
   cost_usd: number;
+  cost_known: boolean;
 }
 
 export interface Agent {
@@ -11,6 +12,7 @@ export interface Agent {
   state: "inactive" | "active" | "waiting" | "finished";
   running: boolean;
   wake_at: number | null;
+  updated_at: string;
   stop_reason: string | null;
   status: string;
   config: any;
@@ -40,23 +42,33 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text || res.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      message = parsed.detail || parsed.message || message;
+    } catch { /* plain-text response */ }
+    throw new Error(message);
+  }
   return res.json() as Promise<T>;
 }
 
 export const api = {
   envs: () => req<EnvSummary[]>("/envs"),
-  createEnv: (name: string, config: any) =>
-    req("/envs", { method: "POST", body: JSON.stringify({ name, config }) }),
+  createEnv: (name: string, config: any, envFile?: string) =>
+    req("/envs", { method: "POST", body: JSON.stringify({ name, config, env_file: envFile }) }),
   env: (e: string) => req<any>(`/envs/${e}`),
   patchEnv: (e: string, config: any) =>
     req(`/envs/${e}`, { method: "PATCH", body: JSON.stringify(config) }),
+  envAction: (e: string, action: string) =>
+    req<any>(`/envs/${e}/actions/${action}`, { method: "POST" }),
   deleteEnv: (e: string) => req(`/envs/${e}`, { method: "DELETE" }),
 
   agents: (e: string) => req<Agent[]>(`/envs/${e}/agents`),
   agent: (e: string, p: string) => req<any>(`/envs/${e}/agents/${p}`),
-  createAgent: (e: string, name: string, config: any) =>
-    req(`/envs/${e}/agents`, { method: "POST", body: JSON.stringify({ name, config }) }),
+  createAgent: (e: string, name: string, config: any, initialMemory?: string) =>
+    req(`/envs/${e}/agents`, { method: "POST", body: JSON.stringify({ name, config, initial_memory: initialMemory }) }),
   patchAgent: (e: string, p: string, body: any) =>
     req<any>(`/envs/${e}/agents/${p}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteAgent: (e: string, p: string) => req(`/envs/${e}/agents/${p}`, { method: "DELETE" }),
@@ -82,4 +94,8 @@ export function num(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+export function cost(usage: Usage): string {
+  return usage.cost_known ? `$${usage.cost_usd.toFixed(4)}` : "pricing unavailable";
 }

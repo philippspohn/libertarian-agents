@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS runners (
   state       TEXT NOT NULL DEFAULT 'inactive',
   config      TEXT NOT NULL,
   wake_at     REAL,
+  wake_after_id INTEGER NOT NULL DEFAULT 0,
   stop_reason TEXT,
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (env, profile)
@@ -46,9 +47,14 @@ CREATE TABLE IF NOT EXISTS usage (
   cached_input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens       INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens    INTEGER NOT NULL DEFAULT 0,
-  cost_usd            REAL NOT NULL DEFAULT 0
+  cost_usd            REAL NOT NULL DEFAULT 0,
+  cost_known          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_env_profile ON usage (env, profile);
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name       TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
 """
 
 _lock = threading.Lock()
@@ -56,6 +62,67 @@ _lock = threading.Lock()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _migrate_config_scope(conn: sqlite3.Connection) -> None:
+    """Move legacy environment goal/summary settings onto each runner.
+
+    Removing the legacy keys makes this migration one-shot, so a deliberately
+    cleared per-runner goal is never repopulated later.
+    """
+    for row in conn.execute("SELECT name, config FROM environments").fetchall():
+        env_cfg = json.loads(row["config"])
+        legacy_goal = env_cfg.pop("goal", None)
+        legacy_summary_provider = env_cfg.pop("summary_provider", None)
+        legacy_summary_model = env_cfg.pop("summary_model", None)
+        if not any(v is not None for v in (legacy_goal, legacy_summary_provider, legacy_summary_model)):
+            continue
+        runner_rows = conn.execute(
+            "SELECT profile, config FROM runners WHERE env=?", (row["name"],)
+        ).fetchall()
+        for runner_row in runner_rows:
+            runner_cfg = json.loads(runner_row["config"])
+            if legacy_goal is not None and "goal" not in runner_cfg:
+                runner_cfg["goal"] = legacy_goal
+            if legacy_summary_provider is not None and "summary_provider" not in runner_cfg:
+                runner_cfg["summary_provider"] = legacy_summary_provider
+            if legacy_summary_model is not None and "summary_model" not in runner_cfg:
+                runner_cfg["summary_model"] = legacy_summary_model
+            conn.execute(
+                "UPDATE runners SET config=? WHERE env=? AND profile=?",
+                (json.dumps(runner_cfg), row["name"], runner_row["profile"]),
+            )
+        conn.execute(
+            "UPDATE environments SET config=? WHERE name=?",
+            (json.dumps(env_cfg), row["name"]),
+        )
+
+
+def _migrate_runner_prompt_and_tools(conn: sqlite3.Connection) -> None:
+    """Remove the retired append-only prompt layer and give existing runners
+    the new channel counterpart. The migration table makes this one-shot, so
+    an operator can subsequently disable leave_channel deliberately."""
+    name = "runner-prompt-and-leave-channel-v1"
+    if conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE name=?", (name,)
+    ).fetchone():
+        return
+    for row in conn.execute("SELECT env, profile, config FROM runners").fetchall():
+        config = json.loads(row["config"])
+        changed = config.pop("operator_instructions", None) is not None
+        tools = config.get("tools")
+        if isinstance(tools, list) and "join_channel" in tools and "leave_channel" not in tools:
+            tools.insert(tools.index("join_channel") + 1, "leave_channel")
+            changed = True
+        if changed:
+            conn.execute(
+                "UPDATE runners SET config=? WHERE env=? AND profile=?",
+                (json.dumps(config), row["env"], row["profile"]),
+            )
+    conn.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?,?)",
+        (name, _now()),
+    )
 
 
 @contextmanager
@@ -68,6 +135,20 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.execute("PRAGMA journal_mode=WAL")
         with _lock:
             conn.executescript(SCHEMA)
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(runners)")}
+            if "wake_after_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE runners ADD COLUMN wake_after_id INTEGER NOT NULL DEFAULT 0"
+                )
+            usage_columns = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
+            if "cost_known" not in usage_columns:
+                # Existing zero costs are ambiguous, so migrate them
+                # conservatively as unknown rather than claiming they were free.
+                conn.execute(
+                    "ALTER TABLE usage ADD COLUMN cost_known INTEGER NOT NULL DEFAULT 0"
+                )
+            _migrate_config_scope(conn)
+            _migrate_runner_prompt_and_tools(conn)
             yield conn
             conn.commit()
     finally:
@@ -81,7 +162,9 @@ class Runner:
     state: RunnerState
     config: RunnerConfig
     wake_at: Optional[float] = None
+    wake_after_id: int = 0
     stop_reason: Optional[str] = None
+    updated_at: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -127,6 +210,7 @@ def delete_env(name: str) -> None:
     with connect() as c:
         c.execute("DELETE FROM environments WHERE name=?", (name,))
         c.execute("DELETE FROM runners WHERE env=?", (name,))
+        c.execute("DELETE FROM usage WHERE env=?", (name,))
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +224,9 @@ def _runner(row: sqlite3.Row) -> Runner:
         state=row["state"],
         config=RunnerConfig.model_validate_json(row["config"]),
         wake_at=row["wake_at"],
+        wake_after_id=row["wake_after_id"],
         stop_reason=row["stop_reason"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -163,6 +249,13 @@ def get_runner(env: str, profile: str) -> Runner:
     return _runner(row)
 
 
+def runner_exists(env: str, profile: str) -> bool:
+    with connect() as c:
+        return c.execute(
+            "SELECT 1 FROM runners WHERE env=? AND profile=?", (env, profile)
+        ).fetchone() is not None
+
+
 def list_runners(env: Optional[str] = None) -> list[Runner]:
     q = "SELECT * FROM runners"
     args: tuple = ()
@@ -179,18 +272,21 @@ def set_state(
     state: RunnerState,
     *,
     wake_at: Optional[float] = None,
+    wake_after_id: int = 0,
     stop_reason: Optional[str] = None,
 ) -> None:
     with connect() as c:
         c.execute(
-            "UPDATE runners SET state=?, wake_at=?, stop_reason=?, updated_at=? WHERE env=? AND profile=?",
-            (state, wake_at, stop_reason, _now(), env, profile),
+            "UPDATE runners SET state=?, wake_at=?, wake_after_id=?, stop_reason=?, updated_at=? "
+            "WHERE env=? AND profile=?",
+            (state, wake_at, wake_after_id, stop_reason, _now(), env, profile),
         )
 
 
 def delete_runner(env: str, profile: str) -> None:
     with connect() as c:
         c.execute("DELETE FROM runners WHERE env=? AND profile=?", (env, profile))
+        c.execute("DELETE FROM usage WHERE env=? AND profile=?", (env, profile))
 
 
 # --------------------------------------------------------------------------
@@ -202,8 +298,8 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
         c.execute(
             """INSERT INTO usage (env, profile, ts, model, input_tokens,
                                   cached_input_tokens, output_tokens,
-                                  reasoning_tokens, cost_usd)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                                  reasoning_tokens, cost_usd, cost_known)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 env,
                 profile,
@@ -214,6 +310,7 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
                 usage.output_tokens,
                 usage.reasoning_tokens,
                 usage.cost_usd,
+                int(usage.cost_known),
             ),
         )
 
@@ -221,7 +318,8 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
 def usage_for(env: str, profile: Optional[str] = None) -> UsageRow:
     q = """SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(cached_input_tokens),0) ci,
                   COALESCE(SUM(output_tokens),0) o, COALESCE(SUM(reasoning_tokens),0) r,
-                  COALESCE(SUM(cost_usd),0) c
+                  COALESCE(SUM(cost_usd),0) c, COUNT(*) n,
+                  CASE WHEN COUNT(*)=0 THEN 1 ELSE MIN(cost_known) END k
            FROM usage WHERE env=?"""
     args: tuple = (env,)
     if profile:
@@ -235,6 +333,7 @@ def usage_for(env: str, profile: Optional[str] = None) -> UsageRow:
         output_tokens=row["o"],
         reasoning_tokens=row["r"],
         cost_usd=row["c"],
+        cost_known=bool(row["k"]),
     )
 
 
@@ -243,6 +342,7 @@ def usage_breakdown(env: str) -> list[dict]:
         rows = c.execute(
             """SELECT profile, model, SUM(input_tokens) i, SUM(cached_input_tokens) ci,
                       SUM(output_tokens) o, SUM(reasoning_tokens) r, SUM(cost_usd) c,
+                      MIN(cost_known) k,
                       COUNT(*) calls
                FROM usage WHERE env=? GROUP BY profile, model ORDER BY profile""",
             (env,),

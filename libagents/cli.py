@@ -55,13 +55,15 @@ def _server() -> Optional[str]:
 @env_app.command("create")
 def env_create(
     name: str,
-    goal: str = typer.Option("", "--goal", "-g"),
     sandbox: str = typer.Option("docker", "--sandbox", help="docker | local"),
     image: str = typer.Option("python:3.12-slim", "--image"),
     secret: list[str] = typer.Option([], "--secret", help="Host env var to forward into the sandbox."),
-    summary_model: str = typer.Option("gpt-5.6-luna", "--summary-model"),
 ):
-    cfg = EnvConfig(sandbox=sandbox, image=image, goal=goal, secrets=list(secret), summary_model=summary_model)
+    cfg = EnvConfig(
+        sandbox=sandbox,
+        image=image,
+        secrets=list(secret),
+    )
     environment.create_environment(name, cfg)
     console.print(f"[green]created[/] environment {name} at {paths.env_dir(name)}")
     if sandbox == "local":
@@ -70,7 +72,7 @@ def env_create(
 
 @env_app.command("ls")
 def env_ls():
-    table = Table("name", "sandbox", "agents", "state", "goal")
+    table = Table("name", "sandbox", "agents", "state")
     for e in control.list_envs():
         st = env_status(e["name"])
         table.add_row(
@@ -78,7 +80,6 @@ def env_ls():
             e["config"].get("sandbox", "?"),
             str(len(environment.list_profiles(e["name"]))),
             "running" if st["running"] else "quiescent",
-            (e["config"].get("goal") or "")[:50],
         )
     console.print(table)
 
@@ -86,13 +87,10 @@ def env_ls():
 @env_app.command("set")
 def env_set(
     name: str,
-    goal: Optional[str] = typer.Option(None, "--goal"),
     sandbox: Optional[str] = typer.Option(None, "--sandbox"),
     cap: Optional[int] = typer.Option(None, "--input-token-cap"),
 ):
     cfg = control.get_env(name)
-    if goal is not None:
-        cfg.goal = goal
     if sandbox is not None:
         cfg.sandbox = sandbox  # type: ignore[assignment]
     if cap is not None:
@@ -103,7 +101,9 @@ def env_set(
 
 @env_app.command("rm")
 def env_rm(name: str, keep_files: bool = typer.Option(False, "--keep-files")):
-    SUPERVISOR.stop_env(name)
+    remaining = SUPERVISOR.stop_env(name, join=15)
+    if remaining:
+        raise typer.BadParameter(f"still stopping: {', '.join(remaining)}; retry shortly")
     environment.delete_environment(name, remove_files=not keep_files)
     console.print(f"[red]deleted[/] environment {name}")
 
@@ -122,19 +122,23 @@ def agent_create(
     output_budget: int = typer.Option(100_000, "--output-budget"),
     tools: Optional[str] = typer.Option(None, "--tools", help="Comma-separated tool names."),
     memoryless: bool = typer.Option(False, "--memoryless"),
-    agent_md: Optional[str] = typer.Option(None, "--agent-md", help="Path to an initial AGENT.md."),
+    goal: str = typer.Option("", "--goal", "-g"),
+    summary_provider: str = typer.Option("openrouter", "--summary-provider"),
+    summary_model: str = typer.Option("deepseek/deepseek-v4-flash-0731", "--summary-model"),
 ):
     cfg = RunnerConfig(
         provider=provider,  # type: ignore[arg-type]
         model=model,
         reasoning_effort=effort or None,
+        goal=goal,
+        summary_provider=summary_provider,  # type: ignore[arg-type]
+        summary_model=summary_model,
         budgets=Budgets(input_tokens=input_budget, output_tokens=output_budget),
         memoryless=memoryless,
     )
     if tools:
         cfg.tools = [t.strip() for t in tools.split(",") if t.strip()]
-    text = open(agent_md).read() if agent_md else None
-    environment.create_profile(env, name, cfg, agent_md=text)
+    environment.create_profile(env, name, cfg)
     console.print(f"[green]created[/] profile {env}/{name}")
 
 
@@ -174,7 +178,8 @@ def agent_config(env: str, name: str, set_json: Optional[str] = typer.Option(Non
 
 @agent_app.command("rm")
 def agent_rm(env: str, name: str, keep_files: bool = typer.Option(False, "--keep-files")):
-    SUPERVISOR.stop(env, name)
+    if not SUPERVISOR.stop(env, name, join=15):
+        raise typer.BadParameter("runner is still stopping; retry shortly")
     environment.delete_profile(env, name, remove_files=not keep_files)
     console.print(f"[red]deleted[/] {env}/{name}")
 
@@ -294,11 +299,13 @@ def board_cmd(env: str, limit: int = typer.Option(30, "--limit", "-n")):
 def usage_cmd(env: str):
     table = Table("profile", "model", "calls", "input", "cached", "output", "reasoning", "cost $")
     for row in control.usage_breakdown(env):
+        shown_cost = f"{row['c']:.4f}" if row["k"] else "unavailable"
         table.add_row(row["profile"], row["model"], str(row["calls"]), str(row["i"]),
-                      str(row["ci"]), str(row["o"]), str(row["r"]), f"{row['c']:.4f}")
+                      str(row["ci"]), str(row["o"]), str(row["r"]), shown_cost)
     console.print(table)
     total = control.usage_for(env)
-    console.print(f"[bold]total[/] {total.input_tokens} in / {total.output_tokens} out / ${total.cost_usd:.4f}")
+    shown_total = f"${total.cost_usd:.4f}" if total.cost_known else "pricing unavailable"
+    console.print(f"[bold]total[/] {total.input_tokens} in / {total.output_tokens} out / {shown_total}")
 
 
 @app.command("status")

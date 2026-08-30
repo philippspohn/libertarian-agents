@@ -41,6 +41,10 @@ def shared_dir(env: str) -> Path:
     return env_dir(env) / "shared"
 
 
+def env_file(env: str) -> Path:
+    return env_dir(env) / ".env"
+
+
 def board_db(env: str) -> Path:
     return shared_dir(env) / "board.db"
 
@@ -55,10 +59,6 @@ def history_dir(env: str, profile: str) -> Path:
 
 def memory_file(env: str, profile: str) -> Path:
     return profile_dir(env, profile) / "memory.md"
-
-
-def agent_md(env: str, profile: str) -> Path:
-    return profile_dir(env, profile) / "AGENT.md"
 
 
 class PathMapper:

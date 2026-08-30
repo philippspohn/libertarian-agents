@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, api, num } from "../api";
+import { Agent, api, cost, num } from "../api";
 
 export default function UsagePanel({ env, agents }: { env: string; agents: Agent[] }) {
   const [data, setData] = useState<any>(null);
@@ -20,7 +20,7 @@ export default function UsagePanel({ env, agents }: { env: string; agents: Agent
           ["cached input", num(t.cached_input_tokens)],
           ["output tokens", num(t.output_tokens)],
           ["reasoning tokens", num(t.reasoning_tokens)],
-          ["cost", `$${t.cost_usd.toFixed(4)}`],
+          ["cost", cost(t)],
         ].map(([k, v]) => (
           <div key={k}>
             <div className="dim mono-sm">{k}</div>
@@ -37,7 +37,7 @@ export default function UsagePanel({ env, agents }: { env: string; agents: Agent
               <tr key={i}>
                 <td>{r.profile}</td><td>{r.model}</td><td>{r.calls}</td>
                 <td>{num(r.i)}</td><td>{num(r.ci)}</td><td>{num(r.o)}</td><td>{num(r.r)}</td>
-                <td>${r.c.toFixed(4)}</td>
+                <td>{r.k ? `$${r.c.toFixed(4)}` : "pricing unavailable"}</td>
               </tr>
             ))}
             {data.breakdown.length === 0 && <tr><td colSpan={8} className="dim">no calls yet</td></tr>}
@@ -45,8 +45,8 @@ export default function UsagePanel({ env, agents }: { env: string; agents: Agent
         </table>
       </div>
       <div className="dim mono-sm">
-        Costs use <code>pricing.json</code> in the working directory (USD per 1M tokens). Unknown models
-        show $0 but their tokens are still counted, and budgets are enforced on tokens.
+        OpenRouter-reported cost is authoritative. Other calls use <code>pricing.json</code> estimates
+        when available; unknown pricing is shown explicitly. Budgets are enforced on tokens.
       </div>
     </div>
   );

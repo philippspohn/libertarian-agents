@@ -27,56 +27,58 @@ def openrouter_client() -> OpenAI:
 def usage_from_response(model: str, usage) -> UsageRow:
     if usage is None:
         return UsageRow()
-    cached = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0
-    reasoning = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0
+    input_details = (
+        getattr(usage, "input_tokens_details", None)
+        or getattr(usage, "prompt_tokens_details", None)
+    )
+    output_details = (
+        getattr(usage, "output_tokens_details", None)
+        or getattr(usage, "completion_tokens_details", None)
+    )
+    cached = getattr(input_details, "cached_tokens", 0) or 0
+    reasoning = getattr(output_details, "reasoning_tokens", 0) or 0
     inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
     out = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
+    reported_cost = getattr(usage, "cost", None)
+    estimated_cost = None if reported_cost is not None else cost(model, inp, cached, out)
     return UsageRow(
         input_tokens=inp,
         cached_input_tokens=cached,
         output_tokens=out,
         reasoning_tokens=reasoning,
-        cost_usd=cost(model, inp, cached, out),
+        cost_usd=float(reported_cost) if reported_cost is not None else (estimated_cost or 0.0),
+        cost_known=reported_cost is not None or estimated_cost is not None,
     )
 
 
-def quick_call(model: str, prompt: str, max_chars: int = 200_000) -> tuple[str, UsageRow]:
-    """One-shot, no-tools call on a cheap model. Used by read_summary and
-    web_search so their outputs reach the agent already compressed."""
+def quick_call(
+    provider: str,
+    model: str,
+    prompt: str,
+    *,
+    max_chars: int = 200_000,
+    max_output_tokens: int = 1500,
+) -> tuple[str, UsageRow]:
+    """One-shot, no-tools call on a cheap model. Used by read_summary so its
+    output reaches the agent already compressed."""
+    if provider == "openrouter":
+        resp = openrouter_client().chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt[:max_chars]}],
+            max_tokens=max_output_tokens,
+        )
+        return (
+            (resp.choices[0].message.content or "").strip(),
+            usage_from_response(model, resp.usage),
+        )
+
     client = openai_client()
     resp = client.responses.create(
         model=model,
         input=[{"role": "user", "content": [{"type": "input_text", "text": prompt[:max_chars]}]}],
         text={"format": {"type": "text"}, "verbosity": "low"},
         reasoning={"effort": "low"},
-        store=False,
-    )
-    return (resp.output_text or "").strip(), usage_from_response(model, resp.usage)
-
-
-def web_search_call(model: str, query: str) -> tuple[str, UsageRow]:
-    """Search via the provider's built-in web_search tool and return a digest."""
-    client = openai_client()
-    resp = client.responses.create(
-        model=model,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "Search the web and answer concisely. Give the key facts in at "
-                            "most 8 short bullet points, each with a source URL.\n\n"
-                            f"Query: {query}"
-                        ),
-                    }
-                ],
-            }
-        ],
-        tools=[{"type": "web_search"}],
-        text={"format": {"type": "text"}, "verbosity": "low"},
-        reasoning={"effort": "low"},
+        max_output_tokens=max_output_tokens,
         store=False,
     )
     return (resp.output_text or "").strip(), usage_from_response(model, resp.usage)

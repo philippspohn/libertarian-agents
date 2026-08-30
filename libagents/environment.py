@@ -1,8 +1,7 @@
 """Creating and tearing down environments and agent profiles.
 
-Creating a profile is `mkdir` plus two files. There is no profile record in
-the control DB beyond its runner config, so the directory listing is the
-source of truth for who exists.
+Creating a profile writes its host-controlled runner config to control.db and
+creates its agent-visible files inside the environment.
 """
 
 from __future__ import annotations
@@ -18,37 +17,16 @@ from .sandbox import DockerSandbox, make_sandbox
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
-DEFAULT_AGENT_MD = """\
-# {profile}
-
-_Your own standing instructions. Rewrite this file however you like -- it is
-loaded into your prompt at the start of every run._
-
-## Who I am
-
-(unwritten)
-
-## How I work
-
-(unwritten)
-"""
-
 DEFAULT_MEMORY = """\
 # memory.md
 
-_Your state snapshot. Survives compaction; nothing else does._
+*Your state snapshot. Survives compaction; nothing else does.*
+"""
 
-## Current focus
-
-(nothing yet)
-
-## Facts worth keeping
-
-(nothing yet)
-
-## Open threads
-
-(nothing yet)
+DEFAULT_ENV_FILE = """\
+# Environment-scoped variables available to every agent shell.
+# This file is plain text inside the shared environment; do not put anything
+# here that agents in this trusted environment should not be able to read.
 """
 
 
@@ -58,7 +36,9 @@ def validate_name(name: str, kind: str = "name") -> str:
     return name
 
 
-def create_environment(name: str, config: EnvConfig | None = None) -> EnvConfig:
+def create_environment(
+    name: str, config: EnvConfig | None = None, *, env_file: str | None = None
+) -> EnvConfig:
     validate_name(name, "environment name")
     if control.env_exists(name):
         raise ValueError(f"environment {name!r} already exists")
@@ -67,20 +47,34 @@ def create_environment(name: str, config: EnvConfig | None = None) -> EnvConfig:
     paths.shared_dir(name).mkdir(parents=True, exist_ok=True)
     control.create_env(name, config)
     Board(paths.board_db(name)).init()
-    write_goal(name, config.goal)
+    write_env_file(name, DEFAULT_ENV_FILE if env_file is None else env_file)
     return config
 
 
-def write_goal(env: str, goal: str) -> None:
-    (paths.shared_dir(env) / "GOAL.md").write_text(goal or "(no goal set)\n", encoding="utf-8")
+def read_env_file(env: str) -> str:
+    fp = paths.env_file(env)
+    return fp.read_text(encoding="utf-8", errors="replace") if fp.exists() else ""
+
+
+def write_env_file(env: str, content: str) -> None:
+    paths.env_file(env).write_text(content, encoding="utf-8")
 
 
 def update_environment(name: str, config: EnvConfig) -> None:
+    validate_name(name, "environment name")
+    old = control.get_env(name)
+    if old.sandbox == "docker" and (
+        config.sandbox != old.sandbox
+        or config.image != old.image
+    ):
+        DockerSandbox(name, old).destroy()
     control.set_env(name, config)
-    write_goal(name, config.goal)
 
 
 def delete_environment(name: str, *, remove_files: bool = True) -> None:
+    validate_name(name, "environment name")
+    from .sandbox import close_shell_sessions
+    close_shell_sessions(name)
     try:
         cfg = control.get_env(name)
         if cfg.sandbox == "docker":
@@ -103,21 +97,32 @@ def create_profile(
     env: str,
     profile: str,
     config: RunnerConfig | None = None,
-    agent_md: str | None = None,
+    initial_memory: str | None = None,
 ) -> RunnerConfig:
     validate_name(profile, "profile name")
     if not control.env_exists(env):
         raise KeyError(f"no such environment: {env}")
+    if control.runner_exists(env, profile):
+        raise ValueError(f"profile {profile!r} already exists in {env!r}")
     d = paths.profile_dir(env, profile)
     d.mkdir(parents=True, exist_ok=True)
     (d / "history").mkdir(exist_ok=True)
     (d / "outputs").mkdir(exist_ok=True)
-    am = paths.agent_md(env, profile)
-    if not am.exists():
-        am.write_text(agent_md or DEFAULT_AGENT_MD.format(profile=profile), encoding="utf-8")
+    toolkit = d / "toolkit"
+    toolkit.mkdir(exist_ok=True)
+    toolkit_readme = toolkit / "README.md"
+    if not toolkit_readme.exists():
+        toolkit_readme.write_text(
+            "# Toolkit\n\nProfile-local scripts, notes, and reusable helpers belong here.\n",
+            encoding="utf-8",
+        )
     mem = paths.memory_file(env, profile)
     if not mem.exists():
-        mem.write_text(DEFAULT_MEMORY, encoding="utf-8")
+        content = DEFAULT_MEMORY if initial_memory is None else initial_memory
+        limit = (config or RunnerConfig()).memory_char_limit
+        if len(content) > limit:
+            raise ValueError(f"initial memory.md exceeds its {limit}-character limit")
+        mem.write_text(content, encoding="utf-8")
 
     config = config or RunnerConfig()
     control.upsert_runner(env, profile, config)
@@ -126,7 +131,12 @@ def create_profile(
 
 
 def delete_profile(env: str, profile: str, *, remove_files: bool = True) -> None:
+    validate_name(env, "environment name")
+    validate_name(profile, "profile name")
     control.delete_runner(env, profile)
+    from .sandbox import close_shell_sessions
+    close_shell_sessions(env, profile)
+    Board(paths.board_db(env)).unregister(profile)
     d = paths.profile_dir(env, profile)
     if remove_files and d.exists():
         shutil.rmtree(d)

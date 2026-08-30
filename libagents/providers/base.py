@@ -34,6 +34,7 @@ class Turn:
     encrypted; everything before the first one can be dropped from the local
     item list because these carry it forward."""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    hosted_tools: list[str] = field(default_factory=list)
     text: str = ""
     reasoning: str = ""
     usage: UsageRow = field(default_factory=UsageRow)
@@ -56,7 +57,13 @@ class Provider(Protocol):
     """Whether the provider compacts server-side. If not, the runner falls
     back to asking the model to summarize its own context."""
 
-    def generate(self, *, instructions: str, items: list[dict], tools: list[ToolSpec]) -> Turn: ...
+    def generate(
+        self, *, instructions: str, items: list[dict], tools: list[ToolSpec],
+        max_output_tokens: int | None = None,
+    ) -> Turn: ...
     def user_item(self, text: str) -> dict: ...
     def tool_result_item(self, call: ToolCall, output: str) -> dict: ...
-    def summarize(self, *, instructions: str, items: list[dict], prompt: str) -> tuple[str, UsageRow]: ...
+    def summarize(
+        self, *, instructions: str, items: list[dict], prompt: str,
+        max_output_tokens: int | None = None,
+    ) -> tuple[str, UsageRow]: ...

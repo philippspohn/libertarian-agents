@@ -1,13 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..llm import quick_call
 from .base import AgentContext, ToolError, ToolResult, obj, tool
-
-MAX_READ_CHARS = 60_000
-"""read_file is deliberately the one tool allowed to return a lot of text."""
-
 
 def _resolve(ctx: AgentContext, path: str) -> Path:
     try:
@@ -33,14 +30,24 @@ def _guard_memory(ctx: AgentContext, target: Path, new_text: str) -> None:
 @tool(
     "read_file",
     """
-    Read a file, optionally a line range. This is the one tool that returns
-    long output verbatim, so use it when you actually need the detail.
+    Read a bounded part of a file verbatim. Select a line range normally. If
+    the runner's character cap cuts that range short, the result gives an
+    exact start_char offset for the next call. start_char is also useful for
+    continuing through a single very long line.
     """,
     obj(
         {
             "path": {"type": "string"},
             "start_line": {"type": "integer", "description": "1-indexed, default 1."},
             "num_lines": {"type": "integer", "description": "Default 400."},
+            "start_char": {
+                "type": "integer",
+                "description": "0-indexed absolute character offset. When set, ignores the line range.",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Optional smaller content limit; cannot exceed the runner's configured cap.",
+            },
         },
         ["path"],
     ),
@@ -51,18 +58,62 @@ def read_file(ctx: AgentContext, args: dict) -> ToolResult:
         raise ToolError(f"no such file: {args['path']}")
     if fp.is_dir():
         entries = sorted(p.name + ("/" if p.is_dir() else "") for p in fp.iterdir())
-        return ToolResult(f"{args['path']} is a directory:\n" + "\n".join(entries[:200]))
+        text = "\n".join(entries)
+        source = f"{args['path']} (directory listing)"
+    else:
+        text = fp.read_text(encoding="utf-8", errors="replace")
+        source = args["path"]
 
-    text = fp.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
-    start = max(1, int(args.get("start_line") or 1))
-    count = max(1, int(args.get("num_lines") or 400))
-    chunk = lines[start - 1: start - 1 + count]
-    body = "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk))
-    if len(body) > MAX_READ_CHARS:
-        body = body[:MAX_READ_CHARS] + "\n... [clipped, narrow the line range]"
-    header = f"{args['path']} lines {start}-{start + len(chunk) - 1} of {len(lines)}"
-    return ToolResult(f"{header}\n{body}")
+    line_parts = text.splitlines(keepends=True)
+    line_offsets = [0]
+    for part in line_parts:
+        line_offsets.append(line_offsets[-1] + len(part))
+
+    if args.get("start_char") is not None:
+        start_offset = max(0, min(len(text), int(args["start_char"])))
+        requested_end = len(text)
+        line_mode = False
+    else:
+        start_line = max(1, int(args.get("start_line") or 1))
+        count = max(1, int(args.get("num_lines") or 400))
+        start_index = min(start_line - 1, len(line_parts))
+        end_index = min(start_index + count, len(line_parts))
+        start_offset = line_offsets[start_index]
+        requested_end = line_offsets[end_index]
+        line_mode = True
+
+    configured_cap = max(1, int(ctx.config.read_file_char_limit))
+    requested_max = args.get("max_chars")
+    requested_cap = configured_cap if requested_max is None else max(1, int(requested_max))
+    content_cap = min(configured_cap, requested_cap)
+    end_offset = min(requested_end, start_offset + content_cap)
+    chunk = text[start_offset:end_offset]
+
+    line_number = text.count("\n", 0, start_offset) + 1
+    previous_newline = text.rfind("\n", 0, start_offset)
+    column = start_offset - previous_newline
+    header = (
+        f"{source} chars [{start_offset}:{end_offset}) of {len(text)}; "
+        f"starts at line {line_number}, column {column}"
+    )
+    body = chunk if chunk else "(empty range)"
+
+    if end_offset < requested_end:
+        next_args = {"path": args["path"], "start_char": end_offset}
+        continuation = (
+            f"\n\n[read_file content cap {content_cap} chars reached; "
+            f"continue with {json.dumps(next_args)}]"
+        )
+    elif line_mode and end_offset < len(text):
+        next_args = {
+            "path": args["path"],
+            "start_line": text.count("\n", 0, end_offset) + 1,
+        }
+        continuation = f"\n\n[requested range complete; continue with {json.dumps(next_args)}]"
+    else:
+        continuation = ""
+
+    return ToolResult(f"{header}\n{body}{continuation}")
 
 
 @tool(
@@ -76,11 +127,14 @@ def read_summary(ctx: AgentContext, args: dict) -> ToolResult:
         raise ToolError(f"no such file: {args['path']}")
     text = fp.read_text(encoding="utf-8", errors="replace")
     focus = args.get("focus") or "the overall content and anything actionable"
-    model = ctx.env_config.summary_model
+    provider = ctx.config.summary_provider
+    model = ctx.config.summary_model
     summary, usage = quick_call(
+        provider,
         model,
         f"Summarize the following file in at most 15 short lines. Focus on {focus}.\n\n"
         f"--- {args['path']} ---\n{text}",
+        max_output_tokens=ctx.output_allowance(1500),
     )
     ctx.add_usage(model, usage)
     return ToolResult(summary or "(empty summary)")
