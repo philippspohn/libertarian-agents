@@ -174,6 +174,20 @@ class Runner:
         return conv
 
     def _over_budget(self) -> Optional[str]:
+        # Budget increments are the one config mutation allowed while active.
+        # Refresh them once per turn so an operator can extend a live run
+        # without rebuilding its provider, tools, or prompt snapshot.
+        latest = control.get_runner(self.env, self.profile).config.budgets
+        if latest != self.config.budgets:
+            previous = self.config.budgets
+            self.config.budgets = latest
+            self.events.emit(
+                "budget_adjusted",
+                old_input=previous.input_tokens,
+                input=latest.input_tokens,
+                old_output=previous.output_tokens,
+                output=latest.output_tokens,
+            )
         b = self.config.budgets
         if self.used.input_tokens >= b.input_tokens:
             return "input token budget exhausted"
@@ -233,6 +247,16 @@ class Runner:
                 return self._stop("waiting", "stopped by operator")
 
             reason = self._over_budget()
+            if reason is None and self._grace >= 0:
+                self._grace = -1
+                conv.items.append(
+                    self.provider.user_item(
+                        prompts.BUDGET_EXTENDED.format(
+                            input_budget=self.config.budgets.input_tokens,
+                            output_budget=self.config.budgets.output_tokens,
+                        )
+                    )
+                )
             if reason:
                 if reason == "output token budget exhausted":
                     raise BudgetExhausted(reason)
@@ -327,6 +351,7 @@ class Runner:
         control.record_usage(self.env, self.profile, model or self.config.model, usage)
         self.used.input_tokens += usage.input_tokens
         self.used.cached_input_tokens += usage.cached_input_tokens
+        self.used.cache_write_tokens += usage.cache_write_tokens
         self.used.output_tokens += usage.output_tokens
         self.used.reasoning_tokens += usage.reasoning_tokens
         self.used.cost_usd += usage.cost_usd

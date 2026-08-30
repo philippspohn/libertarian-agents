@@ -205,10 +205,20 @@ inside a short-lived CLI process would die when the command returns.
 Per-runner input and output token caps, plus an environment-wide input cap as
 a kill switch. On input exhaustion the agent gets a few grace turns to write
 `memory.md` and finish rather than being cut off mid-thought; output exhaustion
-stops immediately. An exhausted runner cannot be restarted until its absolute
-cap is raised. OpenRouter's reported response cost is authoritative; other
-providers use `pricing.json` estimates when present. Unknown pricing is shown
-as unavailable, never as free. Budgets are enforced on tokens, not dollars.
+stops immediately. The Agents UI has `+500k`, `+1M`, and `+5M` input-budget
+buttons. Increments are atomic and are the only runner-config change allowed
+while active: a live runner observes the new limit between turns, a sleeping
+runner is woken, and a stopped/exhausted runner is started again. The overview
+also totals usage, combined limits, cost, and unread messages across agents.
+
+OpenRouter's reported response cost is authoritative. Built-in pricing covers
+GPT-5.6 Sol, Terra, Luna, and the unsuffixed Sol alias, including cached reads,
+cache writes, and the long-context tier: requests above 272K input tokens use
+the long rates for the full request. Existing unknown GPT-5.6 ledger rows are
+backfilled on migration (historical cache writes cannot be recovered and are
+therefore treated as ordinary uncached input). `pricing.json` can add or
+override model entries; unknown pricing is shown as unavailable, never as
+free. Budgets are enforced on tokens, not dollars.
 
 ## Sandboxes
 

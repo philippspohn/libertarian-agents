@@ -337,6 +337,11 @@ def get_agent(env: str, profile: str) -> dict:
                     "content": prompts.BUDGET_EXHAUSTED,
                 },
                 {
+                    "name": "Budget extension notice",
+                    "timing": "when an exhausted active runner receives more budget",
+                    "content": prompts.BUDGET_EXTENDED,
+                },
+                {
                     "name": "Manual compaction request",
                     "timing": "manual compaction only",
                     "content": prompts.COMPACTION_PROMPT,
@@ -386,6 +391,49 @@ def delete_agent(env: str, profile: str, keep_files: bool = False) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"deleted": profile}
+
+
+class InputBudgetAdjustment(BaseModel):
+    input_tokens: int
+    resume: bool = True
+
+
+@app.post("/api/envs/{env}/agents/{profile}/budget")
+def add_agent_budget(env: str, profile: str, body: InputBudgetAdjustment) -> dict:
+    """Add input budget without replacing the rest of a live runner config."""
+    try:
+        config = control.add_input_budget(env, profile, body.input_tokens)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    resumed = False
+    resume_error = None
+    if body.resume:
+        try:
+            if SUPERVISOR.is_running(env, profile):
+                current = control.get_runner(env, profile)
+                if current.state == "waiting":
+                    SUPERVISOR.wake(env, profile, "input budget increased by operator")
+                # Active runners refresh budget limits at the start of every turn.
+                resumed = True
+            else:
+                SUPERVISOR.start(env, profile, "input budget increased by operator")
+                resumed = True
+        except RuntimeError as exc:
+            # The budget update is already durable. Report a separate resume
+            # failure instead of making the successful increment look rolled back.
+            resume_error = str(exc)
+    runner = control.get_runner(env, profile)
+    return {
+        "ok": True,
+        "added_input_tokens": body.input_tokens,
+        "input_budget": config.budgets.input_tokens,
+        "resumed": resumed,
+        "resume_error": resume_error,
+        "state": runner.state,
+    }
 
 
 @app.post("/api/envs/{env}/agents/{profile}/{action}")
@@ -544,7 +592,14 @@ async def stream(env: str, after: int = Query(0)) -> StreamingResponse:
                     payload = json.dumps({"type": "messages", "messages": [m.__dict__ for m in msgs]})
                     yield f"data: {payload}\n\n"
                 agents = list_agents(env)
-                snapshot = {a["profile"]: (a["state"], a["status"], a["usage"]["input_tokens"]) for a in agents}
+                snapshot = {
+                    a["profile"]: (
+                        a["state"], a["status"], a["usage"]["input_tokens"],
+                        a["usage"]["output_tokens"], a["usage"]["cost_usd"],
+                        a["config"]["budgets"]["input_tokens"],
+                    )
+                    for a in agents
+                }
                 if snapshot != last_state:
                     last_state = snapshot
                     yield f"data: {json.dumps({'type': 'agents', 'agents': agents, 'status': env_status(env)})}\n\n"

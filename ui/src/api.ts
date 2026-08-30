@@ -1,6 +1,7 @@
 export interface Usage {
   input_tokens: number;
   cached_input_tokens: number;
+  cache_write_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
   cost_usd: number;
@@ -71,6 +72,11 @@ export const api = {
     req(`/envs/${e}/agents`, { method: "POST", body: JSON.stringify({ name, config, initial_memory: initialMemory }) }),
   patchAgent: (e: string, p: string, body: any) =>
     req<any>(`/envs/${e}/agents/${p}`, { method: "PATCH", body: JSON.stringify(body) }),
+  addInputBudget: (e: string, p: string, inputTokens: number, resume = true) =>
+    req<any>(`/envs/${e}/agents/${p}/budget`, {
+      method: "POST",
+      body: JSON.stringify({ input_tokens: inputTokens, resume }),
+    }),
   deleteAgent: (e: string, p: string) => req(`/envs/${e}/agents/${p}`, { method: "DELETE" }),
   action: (e: string, p: string, a: string) =>
     req(`/envs/${e}/agents/${p}/${a}`, { method: "POST" }),

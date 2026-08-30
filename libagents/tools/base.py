@@ -91,6 +91,7 @@ class AgentContext:
 
         self.used.input_tokens += usage.input_tokens
         self.used.cached_input_tokens += usage.cached_input_tokens
+        self.used.cache_write_tokens += usage.cache_write_tokens
         self.used.output_tokens += usage.output_tokens
         self.used.reasoning_tokens += usage.reasoning_tokens
         self.used.cost_usd += usage.cost_usd

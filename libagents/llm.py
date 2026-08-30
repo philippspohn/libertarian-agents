@@ -35,15 +35,24 @@ def usage_from_response(model: str, usage) -> UsageRow:
         getattr(usage, "output_tokens_details", None)
         or getattr(usage, "completion_tokens_details", None)
     )
-    cached = getattr(input_details, "cached_tokens", 0) or 0
+    def detail(details, name: str) -> int:
+        if isinstance(details, dict):
+            return int(details.get(name, 0) or 0)
+        return int(getattr(details, name, 0) or 0)
+
+    cached = detail(input_details, "cached_tokens")
+    cache_writes = detail(input_details, "cache_write_tokens")
     reasoning = getattr(output_details, "reasoning_tokens", 0) or 0
     inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
     out = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
     reported_cost = getattr(usage, "cost", None)
-    estimated_cost = None if reported_cost is not None else cost(model, inp, cached, out)
+    estimated_cost = (
+        None if reported_cost is not None else cost(model, inp, cached, out, cache_writes)
+    )
     return UsageRow(
         input_tokens=inp,
         cached_input_tokens=cached,
+        cache_write_tokens=cache_writes,
         output_tokens=out,
         reasoning_tokens=reasoning,
         cost_usd=float(reported_cost) if reported_cost is not None else (estimated_cost or 0.0),

@@ -19,6 +19,7 @@ from libagents.board import USER, Board, parse_target  # noqa: E402
 from libagents.models import EnvConfig, RunnerConfig, UsageRow  # noqa: E402
 from libagents.paths import PathMapper  # noqa: E402
 from libagents.providers.openrouter_provider import trim_to_valid_prefix  # noqa: E402
+from libagents.pricing import cost as estimate_cost  # noqa: E402
 from libagents.tools.base import compress  # noqa: E402
 from libagents.llm import usage_from_response  # noqa: E402
 
@@ -507,6 +508,61 @@ def test_unknown_model_pricing_is_not_reported_as_free():
     assert not parsed.cost_known
 
 
+@pytest.mark.parametrize(
+    ("model", "short_input", "long_input", "long_output"),
+    [
+        ("gpt-5.6-sol", 4.00, 8.00, 30.00),
+        ("gpt-5.6-terra", 2.00, 4.00, 18.00),
+        ("gpt-5.6-luna", 0.20, 0.40, 1.80),
+    ],
+)
+def test_gpt56_short_and_long_context_pricing(model, short_input, long_input, long_output):
+    assert estimate_cost(model, 100_000, 0, 0) == pytest.approx(short_input * 0.1)
+    assert estimate_cost(model, 300_000, 0, 100_000) == pytest.approx(
+        long_input * 0.3 + long_output * 0.1
+    )
+
+
+def test_gpt56_pricing_counts_cached_reads_and_cache_writes_separately():
+    # 50K fresh + 20K cached + 30K cache writes + 10K output at Sol short rates.
+    assert estimate_cost("gpt-5.6-sol", 100_000, 20_000, 10_000, 30_000) == pytest.approx(
+        0.05 * 4.00 + 0.02 * 0.40 + 0.03 * 5.00 + 0.01 * 20.00
+    )
+
+    class Details:
+        cached_tokens = 20_000
+        cache_write_tokens = 30_000
+
+    class Usage:
+        input_tokens = 100_000
+        output_tokens = 10_000
+        input_tokens_details = Details()
+
+    parsed = usage_from_response("gpt-5.6-sol", Usage())
+    assert parsed.cache_write_tokens == 30_000
+    assert parsed.cost_usd == pytest.approx(0.558)
+    assert parsed.cost_known
+
+
+def test_existing_unknown_gpt56_usage_is_backfilled():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(control.SCHEMA)
+        conn.execute(
+            """INSERT INTO usage (
+                 env,profile,ts,model,input_tokens,cached_input_tokens,
+                 cache_write_tokens,output_tokens,reasoning_tokens,cost_usd,cost_known
+               ) VALUES ('demo','alice','now','gpt-5.6-luna',100000,0,0,0,0,0,0)"""
+        )
+        control._backfill_gpt56_pricing(conn)
+        row = conn.execute("SELECT cost_usd, cost_known FROM usage").fetchone()
+        assert row["cost_usd"] == pytest.approx(0.02)
+        assert row["cost_known"] == 1
+    finally:
+        conn.close()
+
+
 def test_openrouter_web_search_uses_server_tool(monkeypatch):
     import httpx
     from openai import OpenAI
@@ -828,3 +884,70 @@ def test_exhausted_runner_cannot_get_fresh_grace_by_restarting(env):
     control.record_usage(env, "alice", "test", UsageRow(input_tokens=10))
     with pytest.raises(BudgetLimitError, match="raise the runner limit"):
         SUPERVISOR.start(env, "alice")
+
+
+def test_input_budget_increment_is_additive_and_live_runner_refreshes_it(env):
+    from libagents.runner import Runner
+
+    control.upsert_runner(
+        env, "alice", RunnerConfig(
+            goal="preserved",
+            budgets={"input_tokens": 100, "output_tokens": 200},
+        )
+    )
+    live = Runner(env, "alice")
+    updated = control.add_input_budget(env, "alice", 500_000)
+
+    assert updated.goal == "preserved"
+    assert updated.budgets.input_tokens == 500_100
+    assert updated.budgets.output_tokens == 200
+    assert live.config.budgets.input_tokens == 100
+    assert live._over_budget() is None
+    assert live.config.budgets.input_tokens == 500_100
+
+
+def test_budget_api_adds_tokens_and_resumes_finished_agent(env, monkeypatch):
+    from libagents import api
+
+    control.set_state(env, "alice", "finished", stop_reason="input token budget exhausted")
+    started = []
+    monkeypatch.setattr(api.SUPERVISOR, "is_running", lambda *_: False)
+    monkeypatch.setattr(
+        api.SUPERVISOR, "start", lambda e, p, reason: started.append((e, p, reason))
+    )
+
+    result = api.add_agent_budget(
+        env, "alice", api.InputBudgetAdjustment(input_tokens=500_000)
+    )
+
+    assert result["input_budget"] == 1_500_000
+    assert result["resumed"] and result["resume_error"] is None
+    assert started == [(env, "alice", "input budget increased by operator")]
+
+
+def test_budget_api_adjusts_active_runner_without_stopping_it(env, monkeypatch):
+    from libagents import api
+
+    control.set_state(env, "alice", "active")
+    monkeypatch.setattr(api.SUPERVISOR, "is_running", lambda *_: True)
+    monkeypatch.setattr(
+        api.SUPERVISOR, "start",
+        lambda *_: pytest.fail("an active runner must not be started again"),
+    )
+    monkeypatch.setattr(
+        api.SUPERVISOR, "wake",
+        lambda *_: pytest.fail("an active runner does not need a wake signal"),
+    )
+
+    result = api.add_agent_budget(
+        env, "alice", api.InputBudgetAdjustment(input_tokens=1_000_000)
+    )
+
+    assert result["resumed"]
+    assert result["input_budget"] == 2_000_000
+    assert control.get_runner(env, "alice").state == "active"
+
+
+def test_input_budget_increment_rejects_non_positive_values(env):
+    with pytest.raises(ValueError, match="positive"):
+        control.add_input_budget(env, "alice", 0)

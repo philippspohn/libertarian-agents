@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Agent, api, cost, num } from "../api";
 import ConfirmDestructive from "./ConfirmDestructive";
 
+const BUDGET_INCREMENTS = [
+  { tokens: 500_000, label: "+500k" },
+  { tokens: 1_000_000, label: "+1M" },
+  { tokens: 5_000_000, label: "+5M" },
+];
+
 function Bar({ used, total }: { used: number; total: number }) {
   const pct = Math.min(100, (used / Math.max(1, total)) * 100);
   const cls = pct > 95 ? "over" : pct > 75 ? "warn" : "";
@@ -19,7 +25,10 @@ function renderEvent(ev: any) {
     case "tool_result":
       return `   ${String(ev.summary ?? "").slice(0, 1200)}`;
     case "usage":
-      return `   +${ev.input_tokens} in / ${ev.output_tokens} out`;
+      return `   +${ev.input_tokens} in / ${ev.output_tokens} out / `
+        + (ev.cost_known ? `$${Number(ev.cost_usd ?? 0).toFixed(4)}` : "pricing unavailable");
+    case "budget_adjusted":
+      return `── input budget increased ${num(ev.old_input)} → ${num(ev.input)} ──`;
     case "reasoning":
       return ev.text;
     case "message":
@@ -43,7 +52,7 @@ function renderEvent(ev: any) {
 }
 
 export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: {
-  env: string; agent: Agent; onChange: () => void; onDeleted: () => void; onBack: () => void;
+  env: string; agent: Agent; onChange: () => void | Promise<void>; onDeleted: () => void; onBack: () => void;
 }) {
   const [events, setEvents] = useState<any[]>([]);
   const [detail, setDetail] = useState<any>(null);
@@ -199,6 +208,20 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
     onDeleted();
   }
 
+  async function addBudget(amount: number) {
+    try {
+      const result = await api.addInputBudget(env, profile, amount);
+      setNotice(
+        `added ${num(amount)} input tokens; new limit ${num(result.input_budget)}`
+        + (result.resume_error ? ` (saved, but could not resume: ${result.resume_error})` : "")
+      );
+      await onChange();
+      await loadDetail();
+    } catch (e: any) {
+      setNotice(String(e.message ?? e));
+    }
+  }
+
   const b = agent.config?.budgets ?? { input_tokens: 1, output_tokens: 1 };
   const waitingFor = agent.state === "waiting"
     ? Math.max(0, Math.floor((now - Date.parse(agent.updated_at)) / 1000))
@@ -232,6 +255,12 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
           <div>
             <div className="spread mono-sm dim"><span>input tokens</span><span>{num(agent.usage.input_tokens)} / {num(b.input_tokens)}</span></div>
             <Bar used={agent.usage.input_tokens} total={b.input_tokens} />
+            <div className="quick-budget" style={{ marginTop: 6 }}>
+              <span className="dim mono-sm">add &amp; continue</span>
+              {BUDGET_INCREMENTS.map(({ tokens, label }) => (
+                <button key={tokens} onClick={() => addBudget(tokens)}>{label}</button>
+              ))}
+            </div>
           </div>
           <div>
             <div className="spread mono-sm dim"><span>output tokens</span><span>{num(agent.usage.output_tokens)} / {num(b.output_tokens)}</span></div>
@@ -276,7 +305,7 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
           <div className="card">
             <div className="spread"><b>runner config</b><button onClick={saveConfig} disabled={agent.running}>save</button></div>
             <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>
-              Host-side. Agents cannot read or write this. Stop the runner to edit. This includes enabled tools, per-tool description overrides, summary model, budgets, and context settings.
+              Host-side. Agents cannot read or write this. Stop the runner to edit the full configuration. The additive input-budget buttons above are the only live-config exception.
             </div>
             <textarea rows={16} value={configText} onChange={(e) => setConfigText(e.target.value)} disabled={agent.running} />
           </div>

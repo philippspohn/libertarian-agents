@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS usage (
   model               TEXT NOT NULL,
   input_tokens        INTEGER NOT NULL DEFAULT 0,
   cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens  INTEGER NOT NULL DEFAULT 0,
   output_tokens       INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens    INTEGER NOT NULL DEFAULT 0,
   cost_usd            REAL NOT NULL DEFAULT 0,
@@ -125,6 +126,36 @@ def _migrate_runner_prompt_and_tools(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_gpt56_pricing(conn: sqlite3.Connection) -> None:
+    """Price existing unknown GPT-5.6 rows using the new built-in table."""
+    name = "gpt56-pricing-backfill-v1"
+    if conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE name=?", (name,)
+    ).fetchone():
+        return
+    from .pricing import cost
+
+    rows = conn.execute(
+        """SELECT id, model, input_tokens, cached_input_tokens,
+                  cache_write_tokens, output_tokens
+           FROM usage WHERE cost_known=0"""
+    ).fetchall()
+    for row in rows:
+        estimate = cost(
+            row["model"], row["input_tokens"], row["cached_input_tokens"],
+            row["output_tokens"], row["cache_write_tokens"],
+        )
+        if estimate is not None:
+            conn.execute(
+                "UPDATE usage SET cost_usd=?, cost_known=1 WHERE id=?",
+                (estimate, row["id"]),
+            )
+    conn.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?,?)",
+        (name, _now()),
+    )
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     path = paths.control_db()
@@ -141,6 +172,10 @@ def connect() -> Iterator[sqlite3.Connection]:
                     "ALTER TABLE runners ADD COLUMN wake_after_id INTEGER NOT NULL DEFAULT 0"
                 )
             usage_columns = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
+            if "cache_write_tokens" not in usage_columns:
+                conn.execute(
+                    "ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"
+                )
             if "cost_known" not in usage_columns:
                 # Existing zero costs are ambiguous, so migrate them
                 # conservatively as unknown rather than claiming they were free.
@@ -149,6 +184,7 @@ def connect() -> Iterator[sqlite3.Connection]:
                 )
             _migrate_config_scope(conn)
             _migrate_runner_prompt_and_tools(conn)
+            _backfill_gpt56_pricing(conn)
             yield conn
             conn.commit()
     finally:
@@ -241,6 +277,29 @@ def upsert_runner(env: str, profile: str, config: RunnerConfig) -> None:
         )
 
 
+def add_input_budget(env: str, profile: str, tokens: int) -> RunnerConfig:
+    """Atomically add to one runner's input-token cap.
+
+    This intentionally updates only the nested budget field so an active
+    runner adjustment cannot overwrite unrelated configuration changes.
+    """
+    if tokens <= 0:
+        raise ValueError("budget increment must be positive")
+    with connect() as c:
+        row = c.execute(
+            "SELECT config FROM runners WHERE env=? AND profile=?", (env, profile)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no such runner: {env}/{profile}")
+        config = RunnerConfig.model_validate_json(row["config"])
+        config.budgets.input_tokens += tokens
+        c.execute(
+            "UPDATE runners SET config=?, updated_at=? WHERE env=? AND profile=?",
+            (config.model_dump_json(), _now(), env, profile),
+        )
+    return config
+
+
 def get_runner(env: str, profile: str) -> Runner:
     with connect() as c:
         row = c.execute("SELECT * FROM runners WHERE env=? AND profile=?", (env, profile)).fetchone()
@@ -297,9 +356,9 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
     with connect() as c:
         c.execute(
             """INSERT INTO usage (env, profile, ts, model, input_tokens,
-                                  cached_input_tokens, output_tokens,
+                                  cached_input_tokens, cache_write_tokens, output_tokens,
                                   reasoning_tokens, cost_usd, cost_known)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 env,
                 profile,
@@ -307,6 +366,7 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
                 model,
                 usage.input_tokens,
                 usage.cached_input_tokens,
+                usage.cache_write_tokens,
                 usage.output_tokens,
                 usage.reasoning_tokens,
                 usage.cost_usd,
@@ -317,6 +377,7 @@ def record_usage(env: str, profile: str, model: str, usage: UsageRow) -> None:
 
 def usage_for(env: str, profile: Optional[str] = None) -> UsageRow:
     q = """SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(cached_input_tokens),0) ci,
+                  COALESCE(SUM(cache_write_tokens),0) cw,
                   COALESCE(SUM(output_tokens),0) o, COALESCE(SUM(reasoning_tokens),0) r,
                   COALESCE(SUM(cost_usd),0) c, COUNT(*) n,
                   CASE WHEN COUNT(*)=0 THEN 1 ELSE MIN(cost_known) END k
@@ -330,6 +391,7 @@ def usage_for(env: str, profile: Optional[str] = None) -> UsageRow:
     return UsageRow(
         input_tokens=row["i"],
         cached_input_tokens=row["ci"],
+        cache_write_tokens=row["cw"],
         output_tokens=row["o"],
         reasoning_tokens=row["r"],
         cost_usd=row["c"],
@@ -341,6 +403,7 @@ def usage_breakdown(env: str) -> list[dict]:
     with connect() as c:
         rows = c.execute(
             """SELECT profile, model, SUM(input_tokens) i, SUM(cached_input_tokens) ci,
+                      SUM(cache_write_tokens) cw,
                       SUM(output_tokens) o, SUM(reasoning_tokens) r, SUM(cost_usd) c,
                       MIN(cost_known) k,
                       COUNT(*) calls

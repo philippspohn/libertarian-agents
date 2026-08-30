@@ -126,6 +126,11 @@ BUDGET_EXHAUSTED = (
     "anything that must survive, then call `finish`."
 )
 
+BUDGET_EXTENDED = (
+    "The operator increased your budget while this run was active. Continue your work. "
+    "Current limits: {input_budget} input tokens and {output_budget} output tokens."
+)
+
 
 def instructions(
     profile: str,

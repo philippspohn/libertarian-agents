@@ -297,11 +297,14 @@ def board_cmd(env: str, limit: int = typer.Option(30, "--limit", "-n")):
 
 @app.command("usage")
 def usage_cmd(env: str):
-    table = Table("profile", "model", "calls", "input", "cached", "output", "reasoning", "cost $")
+    table = Table(
+        "profile", "model", "calls", "input", "cached", "cache writes",
+        "output", "reasoning", "cost $",
+    )
     for row in control.usage_breakdown(env):
         shown_cost = f"{row['c']:.4f}" if row["k"] else "unavailable"
         table.add_row(row["profile"], row["model"], str(row["calls"]), str(row["i"]),
-                      str(row["ci"]), str(row["o"]), str(row["r"]), shown_cost)
+                      str(row["ci"]), str(row["cw"]), str(row["o"]), str(row["r"]), shown_cost)
     console.print(table)
     total = control.usage_for(env)
     shown_total = f"${total.cost_usd:.4f}" if total.cost_known else "pricing unavailable"

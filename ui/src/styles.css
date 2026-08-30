@@ -63,6 +63,10 @@ a { color: var(--accent); }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
 th { color: var(--dim); font-weight: normal; font-size: 11px; }
+tfoot td { border-top: 2px solid var(--line); border-bottom: 0; }
+.totals-row { background: #11161d; }
+.quick-budget { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.quick-budget button { padding: 1px 5px; font-size: 10px; color: var(--accent); }
 
 .msg { padding: 5px 0; border-bottom: 1px solid #1b2028; }
 .msg .who { color: var(--accent); }

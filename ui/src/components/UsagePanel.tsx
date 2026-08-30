@@ -18,6 +18,7 @@ export default function UsagePanel({ env, agents }: { env: string; agents: Agent
         {[
           ["input tokens", num(t.input_tokens)],
           ["cached input", num(t.cached_input_tokens)],
+          ["cache writes", num(t.cache_write_tokens)],
           ["output tokens", num(t.output_tokens)],
           ["reasoning tokens", num(t.reasoning_tokens)],
           ["cost", cost(t)],
@@ -31,22 +32,23 @@ export default function UsagePanel({ env, agents }: { env: string; agents: Agent
       <div className="card">
         <b>per profile</b>
         <table style={{ marginTop: 8 }}>
-          <thead><tr><th>profile</th><th>model</th><th>calls</th><th>input</th><th>cached</th><th>output</th><th>reasoning</th><th>cost</th></tr></thead>
+          <thead><tr><th>profile</th><th>model</th><th>calls</th><th>input</th><th>cached</th><th>cache writes</th><th>output</th><th>reasoning</th><th>cost</th></tr></thead>
           <tbody>
             {data.breakdown.map((r: any, i: number) => (
               <tr key={i}>
                 <td>{r.profile}</td><td>{r.model}</td><td>{r.calls}</td>
-                <td>{num(r.i)}</td><td>{num(r.ci)}</td><td>{num(r.o)}</td><td>{num(r.r)}</td>
+                <td>{num(r.i)}</td><td>{num(r.ci)}</td><td>{num(r.cw)}</td><td>{num(r.o)}</td><td>{num(r.r)}</td>
                 <td>{r.k ? `$${r.c.toFixed(4)}` : "pricing unavailable"}</td>
               </tr>
             ))}
-            {data.breakdown.length === 0 && <tr><td colSpan={8} className="dim">no calls yet</td></tr>}
+            {data.breakdown.length === 0 && <tr><td colSpan={9} className="dim">no calls yet</td></tr>}
           </tbody>
         </table>
       </div>
       <div className="dim mono-sm">
-        OpenRouter-reported cost is authoritative. Other calls use <code>pricing.json</code> estimates
-        when available; unknown pricing is shown explicitly. Budgets are enforced on tokens.
+        OpenRouter-reported cost is authoritative. GPT-5.6 uses built-in short/long-context,
+        cached-read, and cache-write rates; <code>pricing.json</code> can add or override estimates.
+        Unknown pricing is shown explicitly. Budgets are enforced on tokens.
       </div>
     </div>
   );
