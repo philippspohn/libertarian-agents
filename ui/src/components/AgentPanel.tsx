@@ -297,6 +297,11 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
               <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>
                 Exact developer/system instructions for the next wake. Tool schemas and user-role runtime injections are shown separately because providers receive them outside this string.
               </div>
+              {detail.prompt.using_base_override && (
+                <div className="prompt-warning">
+                  This agent is using a system-prompt override. Changes to the built-in prompt—including new collaboration and token-efficiency guidance—do not apply until you clear the override above.
+                </div>
+              )}
               <pre className="out prompt-preview">{detail.prompt.system_prompt}</pre>
               <details className="prompt-detail">
                 <summary>current provider conversation items <span className="dim">· exact stored input before the next wake message</span></summary>

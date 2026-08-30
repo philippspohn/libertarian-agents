@@ -515,6 +515,16 @@ def test_agent_detail_exposes_exact_prompt_and_tool_payloads(env):
     assert tools["sleep"]["provider_payload"]["description"] == "Custom sleep description."
 
 
+def test_default_prompt_encourages_collaboration_and_token_efficiency():
+    from libagents import prompts
+
+    prompt = prompts.instructions("alice", "/env", 6000)
+    assert "Other agents may have related or overlapping goals" in prompt
+    assert "Check who else is active and coordinate" in prompt
+    assert "Aim to finish\nwithin your assigned budget" in prompt
+    assert "Aim to be token efficient" in prompt
+
+
 # -------------------------------------------------------------- compaction
 
 

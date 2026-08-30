@@ -100,6 +100,7 @@ pre.out { background: #0b0e13; border: 1px solid var(--line); border-radius: 4px
 .prompt-detail { border-top: 1px solid var(--line); padding: 8px 0; }
 .prompt-detail summary { cursor: pointer; }
 .prompt-preview { max-height: 620px; }
+.prompt-warning { color: var(--amber); border: 1px solid var(--amber); border-radius: 4px; padding: 8px; margin: 8px 0; font-size: 11px; }
 
 @media (max-width: 760px) {
   .app { grid-template-columns: 170px minmax(0, 1fr); }
