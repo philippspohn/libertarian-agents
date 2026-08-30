@@ -142,6 +142,15 @@ class Board:
             c.execute("DELETE FROM cursors WHERE agent=?", (name,))
             c.execute("DELETE FROM agents WHERE name=?", (name,))
 
+    def purge_identity(self, name: str) -> None:
+        """Remove board history involving one identity. Channel messages from
+        other senders remain because channels are shared state."""
+        with self._conn() as c:
+            c.execute("DELETE FROM messages WHERE sender=? OR recipient=?", (name, name))
+            c.execute("DELETE FROM subscriptions WHERE agent=?", (name,))
+            c.execute("DELETE FROM cursors WHERE agent=?", (name,))
+            c.execute("DELETE FROM agents WHERE name=?", (name,))
+
     def set_status(self, name: str, status: Optional[str] = None, state: Optional[str] = None) -> None:
         with self._conn() as c:
             row = c.execute("SELECT status, state FROM agents WHERE name=?", (name,)).fetchone()

@@ -182,6 +182,15 @@ def environment_action(env: str, action: str) -> dict:
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
         return {"ok": True, "sandbox_running": False, "stopped": True}
+    if action == "reset-complete":
+        remaining = SUPERVISOR.stop_env(env, join=15)
+        if remaining:
+            raise HTTPException(409, f"still stopping: {', '.join(remaining)}")
+        try:
+            environment.reset_environment(env)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "reset": env, "sandbox_running": False}
     raise HTTPException(404, f"unknown environment action: {action}")
 
 
@@ -392,6 +401,13 @@ def agent_action(env: str, profile: str, action: str, reason: str = "operator") 
             raise HTTPException(409, "stop the runner first")
         (paths.history_dir(env, profile) / "conversation.json").unlink(missing_ok=True)
         control.set_state(env, profile, "inactive", stop_reason="context reset")
+    elif action == "reset-complete":
+        if not SUPERVISOR.stop(env, profile, join=15):
+            raise HTTPException(409, "runner is still stopping; retry reset shortly")
+        try:
+            environment.reset_profile(env, profile)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     else:
         raise HTTPException(404, f"unknown action: {action}")
     return {"ok": True, "state": control.get_runner(env, profile).state}

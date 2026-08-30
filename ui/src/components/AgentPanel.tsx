@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Agent, api, cost, num } from "../api";
+import ConfirmDestructive from "./ConfirmDestructive";
 
 function Bar({ used, total }: { used: number; total: number }) {
   const pct = Math.min(100, (used / Math.max(1, total)) * 100);
@@ -55,6 +56,7 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
   const [notice, setNotice] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [now, setNow] = useState(Date.now());
+  const [dangerAction, setDangerAction] = useState<"reset" | "delete" | null>(null);
   const seen = useRef(-1);
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -181,6 +183,22 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
     }
   }
 
+  async function resetCompletely() {
+    await api.action(env, profile, "reset-complete");
+    seen.current = -1;
+    setEvents([]);
+    setDangerAction(null);
+    await loadDetail();
+    onChange();
+    setNotice("agent completely reset");
+  }
+
+  async function deleteCompletely() {
+    await api.deleteAgent(env, profile);
+    setDangerAction(null);
+    onDeleted();
+  }
+
   const b = agent.config?.budgets ?? { input_tokens: 1, output_tokens: 1 };
   const waitingFor = agent.state === "waiting"
     ? Math.max(0, Math.floor((now - Date.parse(agent.updated_at)) / 1000))
@@ -190,7 +208,7 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
     <div className="content" ref={scroller}>
       <div className="card">
         <div className="spread">
-          <div className="row">
+          <div className="row" style={{ flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button onClick={onBack}>← all agents</button>
             <span className={`dot s-${agent.state}`} />
             <b>{profile}</b>
@@ -202,15 +220,8 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
             <button onClick={() => act("stop")} disabled={!agent.running}>stop</button>
             <button onClick={() => act("wake")}>wake</button>
             <button onClick={() => act("reset")} disabled={agent.running} title="clear conversation, keep memory.md">reset ctx</button>
-            <button onClick={async () => {
-              if (!confirm(`Delete agent profile "${profile}" and its files?`)) return;
-              try {
-                await api.deleteAgent(env, profile);
-                onDeleted();
-              } catch (e: any) {
-                setNotice(String(e.message ?? e));
-              }
-            }} style={{ color: "var(--red)" }}>delete</button>
+            <button className="danger-button" onClick={() => setDangerAction("reset")}>reset completely</button>
+            <button className="danger-button" onClick={() => setDangerAction("delete")}>delete</button>
           </div>
         </div>
         <div className="dim mono-sm" style={{ margin: "8px 0" }}>
@@ -337,6 +348,17 @@ export default function AgentPanel({ env, agent, onChange, onDeleted, onBack }: 
             </div>
           )}
         </>
+      )}
+      {dangerAction === "reset" && (
+        <ConfirmDestructive title={`Reset ${profile} completely?`} verify={profile} confirmLabel="reset agent" onClose={() => setDangerAction(null)} onConfirm={resetCompletely}>
+          <p>This keeps the agent name and runner configuration, but permanently deletes its folder, memory, history, outputs, usage, runtime state, subscriptions, and board messages or DMs involving this identity.</p>
+          <p>Files in the shared directory remain because they have no reliable owner.</p>
+        </ConfirmDestructive>
+      )}
+      {dangerAction === "delete" && (
+        <ConfirmDestructive title={`Delete ${profile}?`} verify={profile} confirmLabel="delete agent" onClose={() => setDangerAction(null)} onConfirm={deleteCompletely}>
+          <p>This permanently deletes the runner, usage records, and the agent’s entire private folder. Existing shared board messages are retained.</p>
+        </ConfirmDestructive>
       )}
     </div>
   );

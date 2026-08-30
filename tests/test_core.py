@@ -240,6 +240,51 @@ def test_duplicate_profile_is_rejected_and_delete_cleans_state(env):
     assert "alice" not in {a["name"] for a in Board(paths.board_db(env)).list_agents()}
 
 
+def test_complete_agent_reset_keeps_config_but_erases_agent_state(env):
+    from libagents import api
+
+    original = RunnerConfig(goal="keep this goal", model="keep-this-model")
+    control.upsert_runner(env, "alice", original)
+    private_file = paths.profile_dir(env, "alice") / "private.txt"
+    private_file.write_text("erase me", encoding="utf-8")
+    paths.memory_file(env, "alice").write_text("old memory", encoding="utf-8")
+    control.record_usage(env, "alice", original.model, UsageRow(input_tokens=123))
+    board = Board(paths.board_db(env))
+    board.send("alice", "#general", "erase sent channel message")
+    board.send(USER, "@alice", "erase received dm")
+    board.send("bob", "#general", "keep other agent message")
+
+    result = api.agent_action(env, "alice", "reset-complete")
+
+    reset = control.get_runner(env, "alice")
+    assert result["state"] == "inactive"
+    assert reset.config == original
+    assert control.usage_for(env, "alice").input_tokens == 0
+    assert not private_file.exists()
+    assert paths.memory_file(env, "alice").read_text() == environment.DEFAULT_MEMORY
+    assert [m.body for m in board.recent()] == ["keep other agent message"]
+    assert "alice" in board.subscribers("general")
+
+
+def test_complete_environment_reset_keeps_only_environment_config(env):
+    from libagents import api
+
+    original = control.get_env(env)
+    environment.write_env_file(env, "SECRET=erase\n")
+    doomed = paths.shared_dir(env) / "doomed.txt"
+    doomed.write_text("erase", encoding="utf-8")
+    control.record_usage(env, "alice", "test", UsageRow(input_tokens=123))
+
+    result = api.environment_action(env, "reset-complete")
+
+    assert result == {"ok": True, "reset": env, "sandbox_running": False}
+    assert control.get_env(env) == original
+    assert control.list_runners(env) == []
+    assert not doomed.exists()
+    assert environment.read_env_file(env) == environment.DEFAULT_ENV_FILE
+    assert {a["name"] for a in Board(paths.board_db(env)).list_agents()} == {USER}
+
+
 def test_delete_rejects_traversal_names(env, tmp_path):
     with pytest.raises(ValueError):
         environment.delete_environment("..")

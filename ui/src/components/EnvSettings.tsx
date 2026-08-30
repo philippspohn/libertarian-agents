@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import ConfirmDestructive from "./ConfirmDestructive";
 
 export default function EnvSettings({ env, onChange, onDeleted }: { env: string; onChange: () => void; onDeleted: () => void }) {
   const [info, setInfo] = useState<any>(null);
@@ -12,6 +13,7 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeError, setNoticeError] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [dangerAction, setDangerAction] = useState<"reset" | "delete" | null>(null);
 
   function load() {
     return api.env(env).then((d) => {
@@ -78,6 +80,21 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
     }
   }
 
+  async function resetCompletely() {
+    await api.envAction(env, "reset-complete");
+    setDangerAction(null);
+    setNotice("Environment completely reset.");
+    setNoticeError(false);
+    await load();
+    onChange();
+  }
+
+  async function deleteCompletely() {
+    await api.deleteEnv(env);
+    setDangerAction(null);
+    onDeleted();
+  }
+
   return (
     <div className="content">
       <div className="card">
@@ -131,13 +148,23 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
       </div>
       <div className="card">
         <b style={{ color: "var(--red)" }}>danger</b>
-        <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>Deletes the environment directory, its board, and all profiles.</div>
-        <button onClick={async () => {
-          if (!confirm(`Delete environment "${env}" and all its files?`)) return;
-          await api.deleteEnv(env);
-          onDeleted();
-        }}>delete environment</button>
+        <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>Complete reset keeps this environment’s name and sandbox configuration but deletes everything inside it. Delete removes the environment itself.</div>
+        <div className="row">
+          <button className="danger-button" onClick={() => setDangerAction("reset")}>reset environment completely</button>
+          <button className="danger-button" onClick={() => setDangerAction("delete")}>delete environment</button>
+        </div>
       </div>
+      {dangerAction === "reset" && (
+        <ConfirmDestructive title={`Reset ${env} completely?`} verify={env} confirmLabel="reset environment" onClose={() => setDangerAction(null)} onConfirm={resetCompletely}>
+          <p>This destroys the container and permanently deletes every agent, all runner configurations and usage, the environment <code>.env</code>, board history, and every shared or private file.</p>
+          <p>Only the environment name and sandbox configuration are retained. The environment will be empty and stopped.</p>
+        </ConfirmDestructive>
+      )}
+      {dangerAction === "delete" && (
+        <ConfirmDestructive title={`Delete ${env}?`} verify={env} confirmLabel="delete environment" onClose={() => setDangerAction(null)} onConfirm={deleteCompletely}>
+          <p>This permanently deletes the environment itself, its container, all agents and usage, board history, and every shared or private file.</p>
+        </ConfirmDestructive>
+      )}
     </div>
   );
 }

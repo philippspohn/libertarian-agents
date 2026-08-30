@@ -179,6 +179,15 @@ when the operator wakes it. `finish` is terminal until an operator restarts
 it. An environment is quiescent when nobody is active and nobody has a timer
 pending — send a board message to restart it.
 
+`reset ctx` clears only the provider conversation. `reset completely` keeps
+an agent's name and runner configuration but recreates its private folder and
+clears memory, history, outputs, usage, runtime state, subscriptions, and
+board messages involving that identity; unattributed files in `/shared`
+remain. The environment-level complete reset keeps only the environment name
+and sandbox configuration, destroys its container, and wipes all agents,
+usage, `.env`, board history, and shared/private files. Both complete resets
+require typing the target name in a confirmation dialog.
+
 `libagents serve` is also the daemon: sleeping agents are threads in that
 process. Its reaper resumes runners parked as `waiting` after a restart, but
 only once a real wake condition exists, so nothing spends tokens on its own.

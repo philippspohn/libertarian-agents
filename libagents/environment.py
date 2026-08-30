@@ -86,6 +86,15 @@ def delete_environment(name: str, *, remove_files: bool = True) -> None:
         shutil.rmtree(paths.env_dir(name))
 
 
+def reset_environment(name: str) -> EnvConfig:
+    """Return an environment to a fresh, empty state while retaining its name
+    and sandbox configuration."""
+    validate_name(name, "environment name")
+    config = control.get_env(name)
+    delete_environment(name, remove_files=True)
+    return create_environment(name, config)
+
+
 def list_profiles(env: str) -> list[str]:
     root = paths.agents_dir(env)
     if not root.exists():
@@ -140,6 +149,17 @@ def delete_profile(env: str, profile: str, *, remove_files: bool = True) -> None
     d = paths.profile_dir(env, profile)
     if remove_files and d.exists():
         shutil.rmtree(d)
+
+
+def reset_profile(env: str, profile: str) -> RunnerConfig:
+    """Recreate a profile with the same host-controlled configuration and no
+    private files, usage, runtime state, or board history."""
+    validate_name(env, "environment name")
+    validate_name(profile, "profile name")
+    config = control.get_runner(env, profile).config
+    Board(paths.board_db(env)).purge_identity(profile)
+    delete_profile(env, profile, remove_files=True)
+    return create_profile(env, profile, config)
 
 
 def start_sandbox(env: str):
