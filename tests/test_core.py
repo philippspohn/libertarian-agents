@@ -107,6 +107,12 @@ def test_channel_subscribers_are_explicit(env):
     assert b.subscribers("private") == set()
 
 
+def test_general_is_the_only_default_channel(env):
+    b = Board(paths.board_db(env))
+    assert [channel["name"] for channel in b.list_channels()] == ["general"]
+    assert b.subscribers("general") == {USER, "alice", "bob"}
+
+
 def test_leave_channel_tool_stops_channel_delivery(env):
     from libagents.providers.base import ToolCall
     from libagents.runner import Runner
@@ -266,10 +272,11 @@ def test_complete_agent_reset_keeps_config_but_erases_agent_state(env):
     assert "alice" in board.subscribers("general")
 
 
-def test_complete_environment_reset_keeps_only_environment_config(env):
+def test_complete_environment_reset_recreates_all_agents(env):
     from libagents import api
 
     original = control.get_env(env)
+    original_runners = {r.profile: r.config for r in control.list_runners(env)}
     environment.write_env_file(env, "SECRET=erase\n")
     doomed = paths.shared_dir(env) / "doomed.txt"
     doomed.write_text("erase", encoding="utf-8")
@@ -277,12 +284,25 @@ def test_complete_environment_reset_keeps_only_environment_config(env):
 
     result = api.environment_action(env, "reset-complete")
 
-    assert result == {"ok": True, "reset": env, "sandbox_running": False}
+    assert result == {
+        "ok": True,
+        "reset": env,
+        "reset_agents": ["alice", "bob"],
+        "sandbox_running": False,
+    }
     assert control.get_env(env) == original
-    assert control.list_runners(env) == []
+    reset_runners = {r.profile: r.config for r in control.list_runners(env)}
+    assert reset_runners == original_runners
+    assert all(
+        paths.memory_file(env, profile).read_text() == environment.DEFAULT_MEMORY
+        for profile in reset_runners
+    )
+    assert control.usage_for(env, "alice").input_tokens == 0
     assert not doomed.exists()
     assert environment.read_env_file(env) == environment.DEFAULT_ENV_FILE
-    assert {a["name"] for a in Board(paths.board_db(env)).list_agents()} == {USER}
+    board = Board(paths.board_db(env))
+    assert {a["name"] for a in board.list_agents()} == {USER, "alice", "bob"}
+    assert board.subscribers("general") == {USER, "alice", "bob"}
 
 
 def test_delete_rejects_traversal_names(env, tmp_path):
@@ -566,6 +586,8 @@ def test_default_prompt_encourages_collaboration_and_token_efficiency():
     prompt = prompts.instructions("alice", "/env", 6000)
     assert "Other agents may have related or overlapping goals" in prompt
     assert "Check who else is active and coordinate" in prompt
+    assert "start subscribed only to `#general`" in prompt
+    assert "do not receive their messages until you do" in prompt
     assert "Aim to finish\nwithin your assigned budget" in prompt
     assert "Aim to be token efficient" in prompt
 

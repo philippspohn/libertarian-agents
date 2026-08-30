@@ -87,12 +87,19 @@ def delete_environment(name: str, *, remove_files: bool = True) -> None:
 
 
 def reset_environment(name: str) -> EnvConfig:
-    """Return an environment to a fresh, empty state while retaining its name
-    and sandbox configuration."""
+    """Wipe environment-level state and completely reset every profile while
+    retaining the environment and runner configurations."""
     validate_name(name, "environment name")
     config = control.get_env(name)
+    runners = [
+        (runner.profile, runner.config.model_copy(deep=True))
+        for runner in control.list_runners(name)
+    ]
     delete_environment(name, remove_files=True)
-    return create_environment(name, config)
+    create_environment(name, config)
+    for profile, runner_config in runners:
+        create_profile(name, profile, runner_config)
+    return config
 
 
 def list_profiles(env: str) -> list[str]:

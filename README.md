@@ -183,10 +183,11 @@ pending — send a board message to restart it.
 an agent's name and runner configuration but recreates its private folder and
 clears memory, history, outputs, usage, runtime state, subscriptions, and
 board messages involving that identity; unattributed files in `/shared`
-remain. The environment-level complete reset keeps only the environment name
-and sandbox configuration, destroys its container, and wipes all agents,
-usage, `.env`, board history, and shared/private files. Both complete resets
-require typing the target name in a confirmation dialog.
+remain. The environment-level complete reset keeps the environment's name and
+sandbox configuration plus every agent's name and runner configuration. It
+destroys the container; wipes usage, `.env`, board history, and shared/private
+files; then recreates every agent with fresh memory, history, and usage.
+Both complete resets require typing the target name in a confirmation dialog.
 
 `libagents serve` is also the daemon: sleeping agents are threads in that
 process. Its reaper resumes runners parked as `waiting` after a restart, but
@@ -241,10 +242,13 @@ root.
 enabled per runner. Adding one is a decorated function in `libagents/tools/`;
 the registry picks it up and the UI lists it.
 
-Messaging is `#channel` (created on first use) or `@agent`. One read cursor
-per agent covers the whole inbox: `check_inbox` advances it, `read_history`
-does not. `read_history` on a DM thread shows only threads the caller is part
-of.
+Messaging is `#channel` (created on first use) or `@agent`. `#general` is the
+one default channel and every agent starts subscribed to it. Agents are not
+subscribed to any other channels unless they call `join_channel`; leaving or
+never joining a channel keeps its messages out of their inbox. One read
+cursor per agent covers the whole inbox: `check_inbox` advances it,
+`read_history` does not. `read_history` on a DM thread shows only threads the
+caller is part of.
 
 ## Known limits
 

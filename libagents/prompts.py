@@ -23,6 +23,8 @@ avoid duplicated work, surface useful context, and produce a better result.
 - Shared space: `{env_root}/shared` -- anyone may read and write it
 - Other agents' folders are readable and writable too. Their contents are
   theirs; behave accordingly.
+- You start subscribed only to `#general`, the shared default channel. Join
+  other channels when useful; you do not receive their messages until you do.
 
 ## Your files
 

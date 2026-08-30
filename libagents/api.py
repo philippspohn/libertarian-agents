@@ -190,7 +190,12 @@ def environment_action(env: str, action: str) -> dict:
             environment.reset_environment(env)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {"ok": True, "reset": env, "sandbox_running": False}
+        return {
+            "ok": True,
+            "reset": env,
+            "reset_agents": [r.profile for r in control.list_runners(env)],
+            "sandbox_running": False,
+        }
     raise HTTPException(404, f"unknown environment action: {action}")
 
 

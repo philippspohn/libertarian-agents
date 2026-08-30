@@ -148,7 +148,7 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
       </div>
       <div className="card">
         <b style={{ color: "var(--red)" }}>danger</b>
-        <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>Complete reset keeps this environment’s name and sandbox configuration but deletes everything inside it. Delete removes the environment itself.</div>
+        <div className="dim mono-sm" style={{ margin: "4px 0 8px" }}>Complete reset keeps this environment and all agent identities/configurations, but resets every agent and deletes all environment data. Delete removes the environment itself.</div>
         <div className="row">
           <button className="danger-button" onClick={() => setDangerAction("reset")}>reset environment completely</button>
           <button className="danger-button" onClick={() => setDangerAction("delete")}>delete environment</button>
@@ -156,8 +156,8 @@ export default function EnvSettings({ env, onChange, onDeleted }: { env: string;
       </div>
       {dangerAction === "reset" && (
         <ConfirmDestructive title={`Reset ${env} completely?`} verify={env} confirmLabel="reset environment" onClose={() => setDangerAction(null)} onConfirm={resetCompletely}>
-          <p>This destroys the container and permanently deletes every agent, all runner configurations and usage, the environment <code>.env</code>, board history, and every shared or private file.</p>
-          <p>Only the environment name and sandbox configuration are retained. The environment will be empty and stopped.</p>
+          <p>This destroys the container and permanently deletes all usage, the environment <code>.env</code>, board history, and every shared or private file.</p>
+          <p>Every agent is then recreated with the same name and runner configuration, fresh default memory, no history, and zero usage. The environment remains stopped.</p>
         </ConfirmDestructive>
       )}
       {dangerAction === "delete" && (
