@@ -234,8 +234,19 @@ MACOS_SEATBELT_PROFILE = """\
   )
 )
 ; The Metal frontend also ignores TMPDIR and creates compiler modules in its
-; fixed per-user cache. Limit the exception to that one cache subtree.
+; fixed per-user cache. The compiler runs out of process, so it also needs the
+; client to issue a sandbox extension for that same subtree. This mirrors
+; Apple's own Metal-capable profiles without exposing the rest of the cache.
 (allow file-write* (subpath (param "DARWIN_METAL_CACHE")))
+(allow file-issue-extension
+  (require-all
+    (extension-class
+      "com.apple.app-sandbox.read-write"
+      "com.apple.app-sandbox.read"
+    )
+    (subpath (param "DARWIN_METAL_CACHE"))
+  )
+)
 
 (allow process-fork process-exec)
 (allow process-info* (target self))

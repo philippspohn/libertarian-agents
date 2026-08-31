@@ -779,6 +779,8 @@ def test_macos_sandbox_passes_narrow_darwin_write_directories(env, monkeypatch):
     assert "NSIRD_swift-(build|driver|frontend)_" in sandbox_module.MACOS_SEATBELT_PROFILE
     assert "PlugInCache-xcodebuild" in sandbox_module.MACOS_SEATBELT_PROFILE
     assert '(subpath (param "DARWIN_METAL_CACHE"))' in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert "file-issue-extension" in sandbox_module.MACOS_SEATBELT_PROFILE
+    assert "com.apple.app-sandbox.read-write" in sandbox_module.MACOS_SEATBELT_PROFILE
 
 
 def test_host_sandbox_status_marker_tracks_start_and_stop(env):
