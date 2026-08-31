@@ -746,6 +746,11 @@ def test_macos_sandbox_uses_canonical_root_and_environment_local_homes(
     assert environ["HOME"].startswith(f"{sandbox.env_root}/.sandbox/")
     assert environ["TMPDIR"].startswith(f"{sandbox.env_root}/.sandbox/")
     assert environ["CFFIXED_USER_HOME"] == environ["HOME"]
+    assert environ["PATH"].split(os.pathsep)[:3] == [
+        f"{environ['HOME']}/.local/bin",
+        f"{environ['HOME']}/bin",
+        f"{environ['HOME']}/.bun/bin",
+    ]
     assert environ["CLANG_MODULE_CACHE_PATH"].startswith(
         f"{sandbox.env_root}/.sandbox/cache/"
     )

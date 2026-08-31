@@ -325,8 +325,12 @@ def _macos_host_env(env: str, config: EnvConfig, host_root: Path) -> dict[str, s
     state_home = runtime / "state"
     clang_cache = cache / "clang"
     swift_cache = cache / "swift"
+    local_bin = home / ".local" / "bin"
+    home_bin = home / "bin"
+    bun_bin = home / ".bun" / "bin"
     for directory in (
-        home, tmp, cache, config_home, data_home, state_home, clang_cache, swift_cache
+        home, tmp, cache, config_home, data_home, state_home, clang_cache,
+        swift_cache, local_bin, home_bin, bun_bin,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -339,9 +343,18 @@ def _macos_host_env(env: str, config: EnvConfig, host_root: Path) -> dict[str, s
     inherited.setdefault(
         "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     )
+    sandbox_values = _sandbox_env(env, config)
+    base_path = sandbox_values.get("PATH", inherited["PATH"])
+    sandbox_path = os.pathsep.join(
+        (str(local_bin), str(home_bin), str(bun_bin), base_path)
+    )
     return {
         **inherited,
-        **_sandbox_env(env, config),
+        **sandbox_values,
+        # Agent shells are deliberately non-interactive, so they never source
+        # ~/.profile. Keep tools installed into the environment-local home
+        # (for example Yukon and Bun) available to every agent regardless.
+        "PATH": sandbox_path,
         "ENV_ROOT": str(host_root),
         "HOME": str(home),
         "TMPDIR": f"{tmp}{os.sep}",
